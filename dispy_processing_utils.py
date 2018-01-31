@@ -53,19 +53,16 @@ def dump_pickle(filename, data):
     f.close()
     return
 
-def proc_stop_time_stats(infile, outfile, agg_columns, stat_args):
-#    import sys, os
-#    import dispy
-#    sys.path.insert(0,os.path.dirname(os.path.realpath(__file__)))
+def proc_stop_time_stats(infile, outfile, groupby, stat_args):
     import datetime as dt
     import pandas as pd
     import cPickle as pickle
-    from gtfs_stat import meantime, stdtime
+    #from gtfs_stat import meantime, stdtime
     
     print "proc_stop_time_stats.loading"
     apc = load_pickle(infile)
     print "proc_stop_time_stats.aggregating"
-    stop_time_stats = apc.groupby(agg_columns).agg(stat_args)
+    stop_time_stats = apc.groupby(groupby).agg(stat_args)
     print "proc_stop_time_stats.dumping"
     dump_pickle(outfile, stop_time_stats)
     print "proc_stop_time_stats.returning"
