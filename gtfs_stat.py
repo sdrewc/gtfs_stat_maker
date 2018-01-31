@@ -57,7 +57,7 @@ def agg_std(df, mean_field, std_field='std', n_field='n'):
     except:
         return np.nan
     return r
-    
+        
 class stats():
     def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, logger=None):
         self.apc_path = apc_hdf
@@ -133,15 +133,12 @@ class stats():
         upper_bound = self.config.upper_bound
         submit_queue = {}
         self.log.debug('done setting up')
-        
-    def stop_time_stats():
-        pass
     
-    def stop_time_stats(self, service_id=1, groupby=None, stat_args=None):
+    def apc_stop_time_stats(self, groupby=None, stat_args=None):
         if self.distributed:
-            self._stop_time_stats_distributed(service_id, groupby, stat_args)
+            self._stop_time_stats_distributed(groupby, stat_args)
         else:
-            self._stop_time_stats_sequential(service_id, groupby, stat_args)
+            self._stop_time_stats_sequential(groupby, stat_args)
         
     def agg_stop_time_stat_chunks(self, service_id=1, **kwargs):
         '''
@@ -149,7 +146,7 @@ class stats():
         '''
         pass
     
-    def _stop_time_stats_sequential(self, service_id=1, groupby=None, stat_args=None):
+    def _apc_stop_time_stats_sequential(self, groupby=None, stat_args=None):
         # apc data is stored by month (or possibly other chunks)
         i = 0
         groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL'] if groupby==None else groupby
@@ -166,19 +163,19 @@ class stats():
             # create new attributes
             apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
             # get the full possible set of stops associated with a trip
-            s = apc.groupby(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ']).agg({'STOP_AVL':pd.Series.nunique})
-            if len(s.loc[s['STOP_AVL'].ne(1)]) == 0:
-                self.log.warn('block %s has multiple stop_ids for a single combination of file_idx, ROUTE_SHORT_NAME, DIR, PATTCODE, TRIP, SEQ in %d instances' % (key, len(s.loc[s['STOP_AVL'].ne(1)])))
+            #s = apc.groupby(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ']).agg({'STOP_AVL':pd.Series.nunique})
+            #if len(s.loc[s['STOP_AVL'].ne(1)]) == 0:
+            #    self.log.warn('block %s has multiple stop_ids for a single combination of file_idx, ROUTE_SHORT_NAME, DIR, PATTCODE, TRIP, SEQ in %d instances' % (key, len(s.loc[s['STOP_AVL'].ne(1)])))
                 # if this isn't true, then the pivot below won't work
-            canonical_trip_seq = apc.groupby(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL'], as_index=False).size().reset_index()
+            canonical_trip_seq = apc.groupby(groupby, as_index=False).size().reset_index()
             canonical_trip_seq.rename(columns={0:'samples'}, inplace=True)
-            canonical_trip_seq.sort_values(by=['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ'], inplace=True)
+            canonical_trip_seq.sort_values(by=groupby, inplace=True)
             self.log.debug('calculating stop_time_stats')
             stop_time_stats = apc.groupby(groupby).agg(stat_args)
             chunks.append(stop_time_stats)
             # TODO -- Fill in the rest from the Jupyter notebook
         
-    def _stop_time_stats_distributed(self, service_id=1, groupby=None, stat_args=None):
+    def _apc_stop_time_stats_distributed(self, service_id=1, groupby=None, stat_args=None):
         # defaults
         groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL'] if groupby==None else groupby
         stat_args= {'ARRIVAL_TIME':[meantime,stdtime,'size']} if stat_args==None else stat_args
