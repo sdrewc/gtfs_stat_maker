@@ -78,6 +78,26 @@ def agg_mean_and_std(self, df, groupby, mean_field, std_field, n_field):
     agg.loc[:,'mean'] = mean
     agg.loc[:,'std'] = std
     agg.loc[:,n_field] = n
+    
+class gtfs_to_apc():
+    def __init__(self, gtfs_route_cols=None, gtfs_trip_cols=None, gtfs_stop_time_cols=None, 
+                 apc_route_cols=None, apc_trip_cols=None, apc_stop_time_cols=None):
+        '''
+        User may provide columns that uniquely identify a gtfs route, trip, and stop, and
+        apc route, trip, and stop.  If no column names are provided, defaults will be used.
+        Defaults:
+            gtfs_route_cols = ['route_id']
+            gtfs_trip_cols = ['trip_id']
+            gtfs_stop_cols = ['stop_id']
+            
+        '''
+        self.trip_cols = ['gtfs.trip_id', 'apc.trip_id']
+        self.route_cols = []
+        self.stop_cols = []
+        
+        self.trips = None
+        self.stops = None
+        self.routes = None
         
 class stats():
     def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, logger=None, depends=None):
@@ -98,7 +118,7 @@ class stats():
                                                           'std_field':'stdtime',
                                                           'n_field':'size'}},
                                     'size':    'size'}
-        self.apc_stop_time_stats = None
+        self._apc_stop_time_stats = None
         
         # GTFS-STAT
         self.gtfs_to_apc     = None 
@@ -128,7 +148,7 @@ class stats():
         self.dow_by_service_id = pd.notnull(self.dow_count_by_service_id) * 1
         if self.distributed:
             self.log.info('setting up distributed processing')
-            self._setup_distributed_processing()
+            self._setup_distributed_processing(depends)
         
     def _setup_distributed_processing(self, depends=None):
         self.log.debug('imports for distributed processing')
@@ -143,6 +163,8 @@ class stats():
         self.log.debug('reading config for distributed processing')
         self.config = config(self.config_file)
         self.log.debug('setting up job cluster')
+        self._default_depends = [meantime, stdtime, load_pickle, dump_pickle, __file__]
+        self.depends = self._default_depends if depends==None else depends
         self.cluster = dispy.JobCluster(proc_stop_time_stats, 
                                         callback=job_callback, 
                                         depends=self.depends,
@@ -151,8 +173,6 @@ class stats():
         self.log.debug('setting up filename generator')
         self.fg = filename_generator(r'C:\Temp\tmp_gtfs_stat')
         self.log.debug('setting up globals')
-        self._default_depends = [meantime, stdtime, load_pickle, dump_pickle, __file__]
-        self.depends = self.default_depends if depends==None else depends
         jobs_cond = threading.Condition()
         lower_bound = self.config.lower_bound
         upper_bound = self.config.upper_bound
@@ -165,14 +185,15 @@ class stats():
         '''
         # TODO move shared code from _distributed and _sequential into here
         if self.distributed:
-            self._stop_time_stats_distributed(groupby, stat_args)
+            self._apc_stop_time_stats_distributed(groupby, stat_args)
         else:
-            self._stop_time_stats_sequential(groupby, stat_args)
+            self._apc_stop_time_stats_sequential(groupby, stat_args)
+        return self._apc_stop_time_stats
         
     def reagg_apc_stop_time_stats(self, groupby, **kwargs):
         '''
         Assumes that apc data has already been read, and apc_stop_time_stats created.
-        Reaggregates self.apc_stop_time_stats to some higher level of aggregation.
+        Reaggregates self._apc_stop_time_stats to some higher level of aggregation.
         groupby is a set of columns for aggregation
         kwargs is a dict of column-name: aggregation function or dict
             if dict, then it should be aggfunc: kwargs where kwargs are arguments
@@ -185,7 +206,7 @@ class stats():
         groupby = self._default_groupby if groupby==None else groupby
         kwargs = self._default_reagg_args if kwargs==None else kwargs
         
-        grouped = self.apc_stop_time_stats.groupby(groupby)
+        grouped = self._apc_stop_time_stats.groupby(groupby)
         for column, arg in kwargs.iteritems():
             if isinstance(arg, dict):
                 for aggfunc, kas in arg.iteritems():
@@ -203,8 +224,8 @@ class stats():
         
         for col, agg in izip(columns, agg_dfs):
             df.loc[:,col] = agg
-        self.apc_stop_time_stats = df
-        return self.apc_stop_time_stats
+        self._apc_stop_time_stats = df
+        return self._apc_stop_time_stats
     
     def _apc_stop_time_stats_sequential(self, groupby=None, stat_args=None):
         # apc data is stored by month (or possibly other chunks)
@@ -228,13 +249,13 @@ class stats():
         df = pd.concat(chunks)
         df.columns = df.columns.droplevel()
         df.reset_index(inplace=True)
-        self.apc_stop_time_stats = df
-        return self.apc_stop_time_stats
+        self._apc_stop_time_stats = df
+        return self._apc_stop_time_stats
         
     def _apc_stop_time_stats_distributed(self, service_id=1, groupby=None, stat_args=None):
         # defaults
         groupby = self._default_groupby if groupby==None else groupby
-        stat_args= self._default_statargs if stat_args==None else stat_args
+        stat_args= self._default_stat_args if stat_args==None else stat_args
         chunks = []
         i = 0
         
@@ -303,9 +324,6 @@ class stats():
         df = pd.concat(chunks)
         df.columns = df.columns.droplevel()
         df.reset_index(inplace=True)
-        self.apc_stop_time_stats = df
-        return self.apc_stop_time_stats
+        self._apc_stop_time_stats = df
+        return self._apc_stop_time_stats
         
-
-        
-    
