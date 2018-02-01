@@ -87,13 +87,14 @@ class stats():
         global proc_stop_time_stats, proc_combine_stop_time_stats
         import dispy, threading
         import cPickle as pickle
+        import utils
         from dispy_processing_utils import job_callback, load_pickle, dump_pickle, config, print_dispy_job_error
         from dispy_processing_utils import proc_stop_time_stats, proc_combine_stop_time_stats, filename_generator
 
         self.log.debug('reading config for distributed processing')
         self.config = config(self.config_file, nodes)
         self.log.debug('setting up job cluster')
-        self._default_depends = [meantime, stdtime, load_pickle, dump_pickle, __file__]
+        self._default_depends = [meantime, stdtime, load_pickle, dump_pickle, __file__, utils]
         self.depends = self._default_depends if depends==None else depends
         self.cluster = dispy.JobCluster(proc_stop_time_stats, 
                                         callback=job_callback, 
@@ -134,24 +135,38 @@ class stats():
         agg_dfs = [] # list of all the aggregations.  Each will be a series with an
                      # index defined by groupby
         groupby = self._default_groupby if groupby==None else groupby
-        kwargs = self._default_reagg_args if kwargs==None else kwargs
+        kwargs = self._default_reagg_args if kwargs=={} else kwargs
+        self.log.debug('set groupby to %s' % (str(groupby)))
+        self.log.debug('set kwargs to %s' % (str(kwargs)))
         
         grouped = self._apc_stop_time_stats.groupby(groupby)
         for column, arg in kwargs.iteritems():
             if isinstance(arg, dict):
                 for aggfunc, kas in arg.iteritems():
                     columns.append((column,aggfunc.__name__))
-                    agg_dfs.append(grouped.agg({column:aggfunc}, **kas))            
+                    self.log.debug('column: %s' % (columns))
+                    self.log.debug('kwargs: %s' % (str(kas)))
+                    try:
+                        agg = grouped.agg({column:aggfunc}, **kas)
+                    except:
+                        agg = grouped.apply(aggfunc, **kas)
+                    agg_dfs.append(agg)            
             if isinstance(arg, list):
                 for aggfunc in arg:
                     columns.append((column,aggfunc.__name__))
-                    agg_dfs.append(grouped.agg({column:aggfunc}))
+                    try:
+                        agg = grouped.agg({column:aggfunc})
+                    except:
+                        agg = grouped.apply(aggfunc)
+                    agg_dfs.append(agg)
             else:
                 columns.append((column))
                 agg_dfs.append(grouped.agg({column:arg}))
+        
+        self.log.debug('found %s column names for %s aggregations' % (len(columns), len(agg_dfs)))
         mi = pd.MultiIndex.from_tuples(columns)
         df = pd.DataFrame(agg_dfs[0].index, columns=mi)
-        
+                
         for col, agg in izip(columns, agg_dfs):
             df.loc[:,col] = agg
         self._apc_stop_time_stats = df
@@ -207,7 +222,7 @@ class stats():
             ifile, ofile = self.fg.next(), self.fg.next()
             dump_pickle(ifile, apc)
             job = self.cluster.submit(ifile, ofile, groupby, stat_args)
-            print "submitting job %d (%s)" % (i, str(idx))
+            self.log.debug("submitting job %d" % (i))
             jobs_cond.acquire()
             job.id = i
             if job.status == dispy.DispyJob.Created or job.status == dispy.DispyJob.Running:
@@ -222,7 +237,7 @@ class stats():
             pop_ids = []
             for jobid, job in wait_queue.iteritems():
                 if job.status == dispy.DispyJob.Finished:
-                    print "finished job %d" % jobid
+                    self.log.debug("finished job %d" % jobid)
                     tempfile = job.result
                     pop_ids.append(jobid)
                     to_merge.append(tempfile)
@@ -237,17 +252,15 @@ class stats():
         for jobid, job in wait_queue.iteritems():
             try:
                 tempfile = job()
-                print "finished job %d" % jobid
-                print 'TEMPFILE', tempfile
+                self.log.debug("finished job %d" % jobid)
                 pop_ids.append(jobid)
                 to_merge.append(tempfile)
-                print_dispy_job_error(job)
             except Exception as e:
-                print e
+                self.log.warn(e)
                 print_dispy_job_error(job)
         for jobid in pop_ids:
             wait_queue.pop(jobid)
-        print "done waiting"
+        
         for fname in to_merge:
             chunks.append(load_pickle(fname))
         
