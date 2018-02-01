@@ -7,10 +7,13 @@ print os.path.dirname(os.path.realpath(__file__))
 #from gtfs_stat import meantime, stdtime
 
 class config():
-    def __init__(self, filename=None):
+    def __init__(self, filename=None, nodes=None):
         self.lower_bound = 20
         self.upper_bound = 22
-        self.nodes = ['172.30.1.117']
+        self.nodes = ['172.30.1.117'] if nodes==None else nodes
+        if not isinstance(self.nodes, list):
+            self.nodes = [self.nodes]
+
         if filename:
             execfile(filename)
             

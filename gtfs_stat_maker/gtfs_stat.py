@@ -15,33 +15,45 @@ def get_keys(store_path):
     return keys
 
 # Aggregation functions for pandas
-def meantime(series, ignore_date=True):
+def meantime(series, ignore_date=True, normalize=True, zero_hour=3):
     '''
     in: series is a series of datetime objects
     out: datetime object representing the average of series
     '''
-    #ref = series.iloc[0]
     if ignore_date:
-        #series = series.map(lambda x: dt.datetime(ref.year,ref.month,ref.day,x.hour,x.minute,x.second))
         midnight = series.map(lambda x: dt.datetime(x.year, x.month, x.day))
     series = series - midnight
-    #series = series - ref # now it's a series of timedelta objects
-    #return ref + series.mean()
+    if normalize:
+        series = normalize_timedelta(series, zero_hour)
     return series.mean()
 
-def stdtime(series, ignore_date=True):
+def stdtime(series, ignore_date=True, normalize=True, zero_hour=3):
     '''
     in: series is a series of datetime objects
     out: datetime object representing the average of series
     '''
-    #ref = series.iloc[0]
     if ignore_date:
-        #series = series.map(lambda x: dt.datetime(ref.year,ref.month,ref.day,x.hour,x.minute,x.second))
         midnight = series.map(lambda x: dt.datetime(x.year, x.month, x.day))
     series = series - midnight
-    #series = series - ref # now it's a series of timedelta objects
-    #return ref + series.mean()
+    if normalize:
+        series = normalize_timedelta(series, zero_hour)
     return series.std()
+
+def normalize_timedelta(series, zero_hour=0):
+    '''
+    Normalize a timedelta series around a zero hour
+    '''
+    z = dt.timedelta(hours=zero_hour)
+    d = dt.timedelta(hours=24)
+    series.loc[series < z] += d
+    
+    shifted = pd.Series(series, copy=True)
+    shifted.loc[shifted < shifted.mean()] += d
+    
+    if shifted.std() < series.std():
+        return shifted
+    else:
+        return series
 
 def datetime_to_seconds(d):
         if not isinstance(d, dt.datetime):
@@ -100,7 +112,7 @@ class gtfs_to_apc():
         self.routes = None
         
 class stats():
-    def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, logger=None, depends=None):
+    def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, nodes=None, logger=None, depends=None):
         self.apc_path = apc_hdf
         self.apc_keys = get_keys(self.apc_path)
         self.date_ranges = None
@@ -148,9 +160,9 @@ class stats():
         self.dow_by_service_id = pd.notnull(self.dow_count_by_service_id) * 1
         if self.distributed:
             self.log.info('setting up distributed processing')
-            self._setup_distributed_processing(depends)
+            self._setup_distributed_processing(depends, nodes)
         
-    def _setup_distributed_processing(self, depends=None):
+    def _setup_distributed_processing(self, depends=None, nodes=None):
         self.log.debug('imports for distributed processing')
         global jobs_cond, lower_bound, upper_bound, submit_queue, dispy, pickle, threading
         global job_callback, load_pickle, dump_pickle, config, print_dispy_job_error
@@ -161,7 +173,7 @@ class stats():
         from dispy_processing_utils import proc_stop_time_stats, proc_combine_stop_time_stats, filename_generator
 
         self.log.debug('reading config for distributed processing')
-        self.config = config(self.config_file)
+        self.config = config(self.config_file, nodes)
         self.log.debug('setting up job cluster')
         self._default_depends = [meantime, stdtime, load_pickle, dump_pickle, __file__]
         self.depends = self._default_depends if depends==None else depends
@@ -190,7 +202,7 @@ class stats():
             self._apc_stop_time_stats_sequential(groupby, stat_args)
         return self._apc_stop_time_stats
         
-    def reagg_apc_stop_time_stats(self, groupby, **kwargs):
+    def reagg_apc_stop_time_stats(self, groupby=None, **kwargs):
         '''
         Assumes that apc data has already been read, and apc_stop_time_stats created.
         Reaggregates self._apc_stop_time_stats to some higher level of aggregation.
