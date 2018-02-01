@@ -20,21 +20,27 @@ def meantime(series, ignore_date=True):
     in: series is a series of datetime objects
     out: datetime object representing the average of series
     '''
-    ref = series.iloc[0]
+    #ref = series.iloc[0]
     if ignore_date:
-        series = series.map(lambda x: dt.datetime(ref.year,ref.month,ref.day,x.hour,x.minute,x.second))
-    series = series - ref # now it's a series of timedelta objects
-    return ref + series.mean()
+        #series = series.map(lambda x: dt.datetime(ref.year,ref.month,ref.day,x.hour,x.minute,x.second))
+        midnight = series.map(lambda x: dt.datetime(x.year, x.month, x.day))
+    series = series - midnight
+    #series = series - ref # now it's a series of timedelta objects
+    #return ref + series.mean()
+    return series.mean()
 
 def stdtime(series, ignore_date=True):
     '''
     in: series is a series of datetime objects
     out: datetime object representing the average of series
     '''
-    ref = series.iloc[0]
+    #ref = series.iloc[0]
     if ignore_date:
-        series = series.map(lambda x: dt.datetime(ref.year,ref.month,ref.day,x.hour,x.minute,x.second))
-    series = series - ref # now it's a series of timedelta objects
+        #series = series.map(lambda x: dt.datetime(ref.year,ref.month,ref.day,x.hour,x.minute,x.second))
+        midnight = series.map(lambda x: dt.datetime(x.year, x.month, x.day))
+    series = series - midnight
+    #series = series - ref # now it's a series of timedelta objects
+    #return ref + series.mean()
     return series.std()
 
 def datetime_to_seconds(d):
@@ -57,9 +63,24 @@ def agg_std(df, mean_field, std_field='std', n_field='n'):
     except:
         return np.nan
     return r
+
+def agg_mean_and_std(self, df, groupby, mean_field, std_field, n_field):
+    # conversions. assumes datetime and timedelta objects for mean, std, repectively
+    df['mean'] = df[mean_field].map(lambda x: x.total_seconds())
+    df['std'] = df[std_field].map(lambda x: x.total_seconds())
+    
+    # aggregations
+    grouped = df.groupby(groupby)
+    mean = grouped.apply(agg_mean, value_field='mean', n_field=n_field)
+    std  = grouped.apply(agg_std,  mean_field='mean', std_field='std', n_field=n_field)
+    n    = grouped[n_field].sum()
+    agg = pd.DataFrame(index=mean.index)
+    agg.loc[:,'mean'] = mean
+    agg.loc[:,'std'] = std
+    agg.loc[:,n_field] = n
         
 class stats():
-    def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, logger=None):
+    def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, logger=None, depends=None):
         self.apc_path = apc_hdf
         self.apc_keys = get_keys(self.apc_path)
         self.date_ranges = None
@@ -68,8 +89,15 @@ class stats():
         self.distributed = distributed
         self.config_file = config_file
         self.log = logger
-        
         # APC Aggregations
+        self._default_groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL']
+        self._default_stat_args = {'ARRIVAL_TIME':[meantime,stdtime,'size']}
+        self._default_reagg_args = {'meantime':{agg_mean:{'value_field':'meantime',
+                                                          'n_field':'size'}},
+                                    'stdtime': {agg_std: {'mean_field':'meantime',
+                                                          'std_field':'stdtime',
+                                                          'n_field':'size'}},
+                                    'size':    'size'}
         self.apc_stop_time_stats = None
         
         # GTFS-STAT
@@ -102,7 +130,7 @@ class stats():
             self.log.info('setting up distributed processing')
             self._setup_distributed_processing()
         
-    def _setup_distributed_processing(self):
+    def _setup_distributed_processing(self, depends=None):
         self.log.debug('imports for distributed processing')
         global jobs_cond, lower_bound, upper_bound, submit_queue, dispy, pickle, threading
         global job_callback, load_pickle, dump_pickle, config, print_dispy_job_error
@@ -117,17 +145,14 @@ class stats():
         self.log.debug('setting up job cluster')
         self.cluster = dispy.JobCluster(proc_stop_time_stats, 
                                         callback=job_callback, 
-                                        depends=[meantime, 
-                                                 stdtime, 
-                                                 load_pickle, 
-                                                 dump_pickle,
-                                                 __file__,
-                                                 ],
+                                        depends=self.depends,
                                         nodes=self.config.nodes, 
                                         loglevel=logging.info)
         self.log.debug('setting up filename generator')
         self.fg = filename_generator(r'C:\Temp\tmp_gtfs_stat')
         self.log.debug('setting up globals')
+        self._default_depends = [meantime, stdtime, load_pickle, dump_pickle, __file__]
+        self.depends = self.default_depends if depends==None else depends
         jobs_cond = threading.Condition()
         lower_bound = self.config.lower_bound
         upper_bound = self.config.upper_bound
@@ -135,26 +160,60 @@ class stats():
         self.log.debug('done setting up')
     
     def apc_stop_time_stats(self, groupby=None, stat_args=None):
+        '''
+        Reads apc data from an h5 file and computes apc stop-time statistics.
+        '''
+        # TODO move shared code from _distributed and _sequential into here
         if self.distributed:
             self._stop_time_stats_distributed(groupby, stat_args)
         else:
             self._stop_time_stats_sequential(groupby, stat_args)
         
-    def agg_stop_time_stat_chunks(self, service_id=1, **kwargs):
+    def reagg_apc_stop_time_stats(self, groupby, **kwargs):
         '''
-        aggfunc should be a dict of fieldname: kwargs
+        Assumes that apc data has already been read, and apc_stop_time_stats created.
+        Reaggregates self.apc_stop_time_stats to some higher level of aggregation.
+        groupby is a set of columns for aggregation
+        kwargs is a dict of column-name: aggregation function or dict
+            if dict, then it should be aggfunc: kwargs where kwargs are arguments
+            required by aggfunc
         '''
-        pass
+        # TODO make a distributed version of this
+        columns = [] # list of tuples to make an index or multiindex
+        agg_dfs = [] # list of all the aggregations.  Each will be a series with an
+                     # index defined by groupby
+        groupby = self._default_groupby if groupby==None else groupby
+        kwargs = self._default_reagg_args if kwargs==None else kwargs
+        
+        grouped = self.apc_stop_time_stats.groupby(groupby)
+        for column, arg in kwargs.iteritems():
+            if isinstance(arg, dict):
+                for aggfunc, kas in arg.iteritems():
+                    columns.append((column,aggfunc.__name__))
+                    agg_dfs.append(grouped.agg({column:aggfunc}, **kas))            
+            if isinstance(arg, list):
+                for aggfunc in arg:
+                    columns.append((column,aggfunc.__name__))
+                    agg_dfs.append(grouped.agg({column:aggfunc}))
+            else:
+                columns.append((column))
+                agg_dfs.append(grouped.agg({column:arg}))
+        mi = pd.MultiIndex.from_tuples(columns)
+        df = pd.DataFrame(agg_dfs[0].index, columns=mi)
+        
+        for col, agg in izip(columns, agg_dfs):
+            df.loc[:,col] = agg
+        self.apc_stop_time_stats = df
+        return self.apc_stop_time_stats
     
     def _apc_stop_time_stats_sequential(self, groupby=None, stat_args=None):
         # apc data is stored by month (or possibly other chunks)
-        i = 0
-        groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL'] if groupby==None else groupby
-        stat_args= {'ARRIVAL_TIME':[meantime,stdtime,'size']} if stat_args==None else stat_args
+        groupby = self._default_groupby if groupby==None else groupby
+        stat_args= self._default_stat_args if stat_args==None else stat_args
         chunks = []
         for key in self.apc_keys:
             self.log.debug('reading file %s, key %s' % (self.apc_path, key))
-            apc = pd.read_hdf(self.apc_path, key, stop=1000000)
+            apc = pd.read_hdf(self.apc_path, key)
             
             self.log.debug('updating file_idx')
             for idx, row in self.date_ranges.iterrows():
@@ -162,30 +221,27 @@ class stats():
 
             # create new attributes
             apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
-            # get the full possible set of stops associated with a trip
-            #s = apc.groupby(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ']).agg({'STOP_AVL':pd.Series.nunique})
-            #if len(s.loc[s['STOP_AVL'].ne(1)]) == 0:
-            #    self.log.warn('block %s has multiple stop_ids for a single combination of file_idx, ROUTE_SHORT_NAME, DIR, PATTCODE, TRIP, SEQ in %d instances' % (key, len(s.loc[s['STOP_AVL'].ne(1)])))
-                # if this isn't true, then the pivot below won't work
-            canonical_trip_seq = apc.groupby(groupby, as_index=False).size().reset_index()
-            canonical_trip_seq.rename(columns={0:'samples'}, inplace=True)
-            canonical_trip_seq.sort_values(by=groupby, inplace=True)
             self.log.debug('calculating stop_time_stats')
             stop_time_stats = apc.groupby(groupby).agg(stat_args)
             chunks.append(stop_time_stats)
-            # TODO -- Fill in the rest from the Jupyter notebook
+            
+        df = pd.concat(chunks)
+        df.columns = df.columns.droplevel()
+        df.reset_index(inplace=True)
+        self.apc_stop_time_stats = df
+        return self.apc_stop_time_stats
         
     def _apc_stop_time_stats_distributed(self, service_id=1, groupby=None, stat_args=None):
         # defaults
-        groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL'] if groupby==None else groupby
-        stat_args= {'ARRIVAL_TIME':[meantime,stdtime,'size']} if stat_args==None else stat_args
+        groupby = self._default_groupby if groupby==None else groupby
+        stat_args= self._default_statargs if stat_args==None else stat_args
         chunks = []
         i = 0
         
         # iterate through keys.  apc data is stored by month (or possibly other chunks)
         for key in self.apc_keys:
             self.log.debug('reading file %s, key %s' % (self.apc_path, key))
-            apc = pd.read_hdf(self.apc_path, key, stop=1000000)
+            apc = pd.read_hdf(self.apc_path, key)
             
             # assign each record to the gtfs feed with corresponding date range
             self.log.debug('updating file_idx')
@@ -194,15 +250,6 @@ class stats():
 
             # create new attributes
             apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
-            
-            # get the full possible set of stops associated with a trip
-            apc.drop_duplicates(subset=['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL','ARRIVAL_TIME'], inplace=True)
-            s = apc.groupby(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ']).agg({'STOP_AVL':pd.Series.nunique})
-            if len(s.loc[s['STOP_AVL'].ne(1)]) == 0:
-                self.log.warn('block %s has multiple stop_ids for a single combination of file_idx, ROUTE_SHORT_NAME, DIR, PATTCODE, TRIP, SEQ in %d instances' % (key, len(s.loc[s['STOP_AVL'].ne(1)])))
-            canonical_trip_seq = apc.groupby(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL'], as_index=False).size().reset_index()
-            canonical_trip_seq.rename(columns={0:'samples'}, inplace=True)
-            canonical_trip_seq.sort_values(by=['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ'], inplace=True)
             
             wait_queue = {}
             to_merge = []
@@ -256,22 +303,9 @@ class stats():
         df = pd.concat(chunks)
         df.columns = df.columns.droplevel()
         df.reset_index(inplace=True)
-        self._stats_by_chunk
-        return
+        self.apc_stop_time_stats = df
+        return self.apc_stop_time_stats
         
-    def agg_mean_and_std(self, df, groupby, mean_field, std_field, n_field):
-        # conversions. assumes datetime and timedelta objects for mean, std, repectively
-        df['mean'] = df[mean_field].map(lambda x: datetime_to_seconds(x))
-        df['std'] = df[std_field].map(lambda x: x.total_seconds())
-        
-        # aggregations
-        grouped = df.groupby(groupby)
-        mean = grouped.apply(agg_mean, value_field='mean', n_field=n_field)
-        std  = grouped.apply(agg_std,  mean_field='mean', std_field='std', n_field=n_field)
-        n    = grouped[n_field].sum()
-        agg = pd.DataFrame(index=mean.index)
-        agg.loc[:,'mean'] = mean
-        agg.loc[:,'std'] = std
-        agg.loc[:,n_field] = n
+
         
     
