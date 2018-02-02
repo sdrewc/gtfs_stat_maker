@@ -1,10 +1,6 @@
 import sys, os, threading
 import dispy
 import cPickle as pickle
-sys.path.insert(0,os.path.dirname(os.path.realpath(__file__)))
-print os.path.dirname(os.path.realpath(__file__))
-#import gtfs_stat
-#from gtfs_stat import meantime, stdtime
 
 class config():
     def __init__(self, filename=None, nodes=None):
