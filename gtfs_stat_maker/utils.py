@@ -65,14 +65,15 @@ def agg_mean(df, value_field='mean', n_field='n'):
 def agg_std(df, mean_field, std_field='std', n_field='n'):
     # using formula for variance: https://stats.stackexchange.com/questions/121107/is-there-a-name-or-reference-in-a-published-journal-book-for-the-following-varia
     mean = agg_mean(df, mean_field, n_field) # TODO: should check that 'wgtmean', 'var', 'val' are not taken
-    
+    if isinstance(mean, np.timedelta64):
+        mean = mean.item() / 10**9 
     # conversions. convert to seconds in float if datetimes are passed
     conversions = []
     for f in [mean_field, std_field]:
-        if pd.core.common.is_timedelta64_dtype(df[f]):
-            df.loc[:,f] = df[f].map(lambda x: x.total_seconds())
+        if pd.core.common.is_timedelta64_dtype(df[f]) or pd.core.common.is_datetime64_dtype(df[f]):
+            df[f] = df[f].map(lambda x: x.total_seconds()).fillna(0)
             conversions.append(f)
-        
+
     df['var'] = np.power(df[std_field],2)
     df['val'] = df[n_field] * np.power(df[mean_field] - mean,2) + (df[n_field] - 1) * df['var']
     
