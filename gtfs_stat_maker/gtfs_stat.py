@@ -47,7 +47,7 @@ class stats():
                                     'stdtime': {agg_std: {'mean_field':'meantime',
                                                           'std_field':'stdtime',
                                                           'n_field':'size'}},
-                                    'size':    'size'}
+                                    'size':    np.sum}
         self._apc_stop_time_stats = None
         
         # GTFS-STAT
@@ -143,29 +143,44 @@ class stats():
         for column, arg in kwargs.iteritems():
             if isinstance(arg, dict):
                 for aggfunc, kas in arg.iteritems():
-                    columns.append((column,aggfunc.__name__))
-                    self.log.debug('column: %s' % (columns))
-                    self.log.debug('kwargs: %s' % (str(kas)))
+                    #self.log.debug('column: %s' % (column))
+                    #self.log.debug('aggfunc: %s' % (aggfunc))
+                    #self.log.debug('kwargs: %s' % (str(kas)))
+                    if len(arg) > 1:
+                        columns.append((column,aggfunc.__name__))
+                    else:
+                        columns.append((column,))
                     try:
                         agg = grouped.agg({column:aggfunc}, **kas)
                     except:
                         agg = grouped.apply(aggfunc, **kas)
                     agg_dfs.append(agg)            
-            if isinstance(arg, list):
+            elif isinstance(arg, list):
                 for aggfunc in arg:
-                    columns.append((column,aggfunc.__name__))
+                    #self.log.debug('column: %s' % (column))
+                    #self.log.debug('aggfunc: %s' % (str(aggfunc)))
+                    if len(arg) > 1:
+                        columns.append((column,aggfunc.__name__))
+                    else:
+                        columns.append((column,))
                     try:
                         agg = grouped.agg({column:aggfunc})
                     except:
                         agg = grouped.apply(aggfunc)
                     agg_dfs.append(agg)
             else:
-                columns.append((column))
-                agg_dfs.append(grouped.agg({column:arg}))
+                #self.log.debug('column: %s' % (column))
+                #self.log.debug('aggfunc: %s' % (str(arg)))
+                columns.append((column,))
+                try:
+                    agg = grouped.agg({column:arg})
+                except:
+                    agg = grouped.apply({column:arg})
+                agg_dfs.append(agg)
         
-        self.log.debug('found %s column names for %s aggregations' % (len(columns), len(agg_dfs)))
+        #self.log.debug('found %s column names for %s aggregations' % (len(columns), len(agg_dfs)))
         mi = pd.MultiIndex.from_tuples(columns)
-        df = pd.DataFrame(agg_dfs[0].index, columns=mi)
+        df = pd.DataFrame(index=agg_dfs[0].index, columns=mi)
                 
         for col, agg in izip(columns, agg_dfs):
             df.loc[:,col] = agg
