@@ -178,12 +178,13 @@ class stats():
                     agg = grouped.apply({column:arg})
                 agg_dfs.append(agg)
         
-        #self.log.debug('found %s column names for %s aggregations' % (len(columns), len(agg_dfs)))
+        self.log.debug('found %s column names for %s aggregations' % (len(columns), len(agg_dfs)))
+        #self.log.debug('columns: %s' % str(columns))
         mi = pd.MultiIndex.from_tuples(columns)
-        df = pd.DataFrame(index=agg_dfs[0].index, columns=mi)
-                
-        for col, agg in izip(columns, agg_dfs):
+        df = pd.DataFrame(index=agg_dfs[0].index, columns=mi)    
+        for col, agg in izip(mi, agg_dfs):
             df.loc[:,col] = agg
+        df.reset_index(inplace=True)
         self._apc_stop_time_stats = df
         return self._apc_stop_time_stats
     
