@@ -64,31 +64,58 @@ def agg_mean(df, value_field='mean', n_field='n'):
 
 def agg_std(df, mean_field, std_field='std', n_field='n'):
     # using formula for variance: https://stats.stackexchange.com/questions/121107/is-there-a-name-or-reference-in-a-published-journal-book-for-the-following-varia
-    mean = agg_mean(df, mean_field, n_field) # TODO: should check that 'wgtmean', 'var', 'val' are not taken
-    if isinstance(mean, np.timedelta64):
-        mean = mean.item() / 10**9 
-    # conversions. convert to seconds in float if datetimes are passed
-    conversions = []
-    for f in [mean_field, std_field]:
-        if pd.core.common.is_timedelta64_dtype(df[f]) or pd.core.common.is_datetime64_dtype(df[f]):
-            df[f] = df[f].map(lambda x: x.total_seconds()).fillna(0)
-            conversions.append(f)
+    #df = pd.DataFrame(df, copy=True)
+    df.loc[:,'mean'] = df[mean_field].map(lambda x: x.total_seconds())
+    df.loc[:,'std'] = df[std_field].map(lambda x: x.total_seconds())
+    
+    df['wgtval'] = df['mean'] * df[n_field] # TODO: should check that 'wgtval' isn't taken...
+    mean = df['wgtval'].sum() / df[n_field].sum()
 
-    df['var'] = np.power(df[std_field],2)
-    df['val'] = df[n_field] * np.power(df[mean_field] - mean,2) + (df[n_field] - 1) * df['var']
+    #mean = agg_mean(df, mean_field, n_field).total_seconds() # TODO: should check that 'wgtmean', 'var', 'val' are not taken
+    df.loc[:,'var'] = np.power(df['std'],2)
+    df.loc[:,'val'] = df[n_field] * np.power(df['mean'] - mean,2) + (df[n_field] - 1) * df['var']
+
+    #print df.dtypes
+    #print len(df)
     
     try:
         r = np.sqrt(df['val'].sum() / (df[n_field].sum() - 1))
-        if len(conversions) > 0:
-            r = dt.timedelta(seconds=r)
+        r = dt.timedelta(seconds=r)
+        #print r
+        #self.log.debug(dt.timedelta(seconds=r))
     except:
-        r = np.nan
-    
-    # convert back
-    for f in conversions:
-        df.loc[:,f] = df[f].map(lambda x: dt.timedelta(seconds=x))
-        
+        r = pd.NaT
     return r
+
+#def agg_std(df, mean_field, std_field='std', n_field='n'):
+#    # using formula for variance: https://stats.stackexchange.com/questions/121107/is-there-a-name-or-reference-in-a-published-journal-book-for-the-following-varia
+#    mean = agg_mean(df, mean_field, n_field) # TODO: should check that 'wgtmean', 'var', 'val' are not taken
+#    if isinstance(mean, np.timedelta64):
+#        mean = mean.item() / 10**9 
+#    # conversions. convert to seconds in float if datetimes are passed
+#    conversions = []
+##    df[mean_field] = df[mean_field].map(lambda x: x.total_seconds()).fillna(0)
+##    df[std_field] = df[std_field].map(lambda x: x.total_seconds()).fillna(0)
+#    for f in [mean_field, std_field]:
+#        if pd.core.common.is_timedelta64_dtype(df[f]) or pd.core.common.is_datetime64_dtype(df[f]):
+#            df[f] = df[f].map(lambda x: x.total_seconds()).fillna(0)
+#            conversions.append(f)
+#
+#    df.loc[:,'var'] = np.power(df[std_field],2)
+#    df.loc[:,'val'] = df[n_field] * np.power(df[mean_field] - mean,2) + (df[n_field] - 1) * df['var']
+#    
+#    try:
+#        r = np.sqrt(df['val'].sum() / (df[n_field].sum() - 1))
+#        if len(conversions) > 0:
+#            r = dt.timedelta(seconds=r)
+#    except:
+#        r = np.nan
+#    
+#    # convert back
+#    #for f in conversions:
+#    #    df.loc[:,f] = df[f].map(lambda x: dt.timedelta(seconds=x))
+#        
+#    return r
 
 def agg_mean_and_std(self, df, groupby, mean_field, std_field, n_field):
     # conversions. assumes datetime and timedelta objects for mean, std, repectively
