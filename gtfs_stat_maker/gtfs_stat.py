@@ -8,6 +8,7 @@ import partridge as ptg
 from itertools import izip
 sys.path.insert(0,os.path.dirname(os.path.realpath(__file__)))
 from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds
+import holidays
     
 class gtfs_to_apc():
     def __init__(self, gtfs_route_cols=None, gtfs_trip_cols=None, gtfs_stop_time_cols=None, 
@@ -48,20 +49,27 @@ class stats():
                                                           'std_field':'stdtime',
                                                           'n_field':'size'}},
                                     'size':    np.sum}
+        self.route_rebrand = {'8X':'8', '16X':'7X', '17':'57', '71':'7', '108':'25', '5L':'5R', '9L':'9R',
+                              '14L':'14R', '28L':'28R', '38L':'38R', '71L':'7R'}
+        
         self._apc_stop_time_stats = None
         
         # GTFS-STAT
-        self.gtfs_to_apc     = None 
-        self.route_stats     = None
-        self.trip_stats      = None
+        self.gtfs_to_apc = None 
+        self.apc_to_gtfs = None
+        self.route_stats = None
+        self.trip_stats = None
         self.stop_time_stats = None
         
-        if isinstance(gtfs_paths, str):
-            gtfs_paths = [gtfs_paths]
-            
+        self.gtfs_feeds = {}
+        self._gtfs_paths = gtfs_paths
+        if isinstance(self.gtfs_paths, str):
+            self.gtfs_paths = [self.gtfs_paths]
+        self._load_gtfs_feeds()
+        
         sids = []
         self.log.info('getting service_id info from gtfs paths')
-        for idx, gtfs_path in izip(range(len(gtfs_paths)), gtfs_paths):
+        for idx, gtfs_path in izip(range(len(self.gtfs_paths)), self.gtfs_paths):
             service_ids_by_date = ptg.read_service_ids_by_date(gtfs_path)
             service_ids_by_date = pd.DataFrame.from_dict(service_ids_by_date, orient='index').reset_index()
             service_ids_by_date.rename(columns={'index':'date', 0:'service_id'}, inplace=True)
@@ -75,6 +83,7 @@ class stats():
         self.date_ranges.columns = ['start_date','end_date']
         self.dow_count_by_service_id = sids.pivot_table(index=['file_idx','service_id'],
                                                         columns=['weekday'], aggfunc='count')
+            
         self.dow_by_service_id = pd.notnull(self.dow_count_by_service_id) * 1
         if self.distributed:
             self.log.info('setting up distributed processing')
@@ -110,15 +119,21 @@ class stats():
         submit_queue = {}
         self.log.debug('done setting up')
     
-    def apc_stop_time_stats(self, groupby=None, stat_args=None):
+    def _load_gtfs_feeds(self, service_id=1):
+        for i, gtfs_path in izip(range(len(self.gtfs_paths)), self.gtfs_paths):
+            feed = ptg.feed(gtfs_path, view={'trips.txt':{'service_id':service_id}})
+            self.gtfs_feeds[i] = feed
+        return self.gtfs_feeds
+    
+    def apc_stop_time_stats(self, weekday=True, holiday=False, groupby=None, stat_args=None):
         '''
         Reads apc data from an h5 file and computes apc stop-time statistics.
         '''
         # TODO move shared code from _distributed and _sequential into here
         if self.distributed:
-            self._apc_stop_time_stats_distributed(groupby, stat_args)
+            self._apc_stop_time_stats_distributed(weekday, holiday, groupby, stat_args)
         else:
-            self._apc_stop_time_stats_sequential(groupby, stat_args)
+            self._apc_stop_time_stats_sequential(weekday, holiday, groupby, stat_args)
         return self._apc_stop_time_stats
         
     def reagg_apc_stop_time_stats(self, groupby=None, **kwargs):
@@ -151,8 +166,10 @@ class stats():
                     else:
                         columns.append((column,))
                     try:
+                        self.log.debug('grouped.agg({%s:%s}, %s)' % (column, aggfunc, kas))
                         agg = grouped.agg({column:aggfunc}, **kas)
                     except:
+                        self.log.debug('grouped.apply(%s, %s)' % (aggfunc, kas))
                         agg = grouped.apply(aggfunc, **kas)
                     agg_dfs.append(agg)            
             elif isinstance(arg, list):
@@ -184,15 +201,17 @@ class stats():
         df = pd.DataFrame(index=agg_dfs[0].index, columns=mi)    
         for col, agg in izip(mi, agg_dfs):
             df.loc[:,col] = agg
-        df.reset_index(inplace=True)
-        self._apc_stop_time_stats = df
+        #df.reset_index(inplace=True)
+        self._apc_stop_time_stats = df.reset_index()
         return self._apc_stop_time_stats
     
-    def _apc_stop_time_stats_sequential(self, groupby=None, stat_args=None):
+    def _apc_stop_time_stats_sequential(self, weekday=True, holiday=False, groupby=None, stat_args=None):
         # apc data is stored by month (or possibly other chunks)
         groupby = self._default_groupby if groupby==None else groupby
         stat_args= self._default_stat_args if stat_args==None else stat_args
         chunks = []
+        us_holidays = holidays.UnitedStates()
+        
         for key in self.apc_keys:
             self.log.debug('reading file %s, key %s' % (self.apc_path, key))
             apc = pd.read_hdf(self.apc_path, key)
@@ -203,22 +222,29 @@ class stats():
 
             # create new attributes
             apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
-            self.log.debug('calculating stop_time_stats')
+            if weekday: 
+                apc = apc.loc[apc['weekday'].isin([0,1,2,3,4])]
+            if not holiday:
+                apc = apc.loc[~apc['DATE'].map(lambda x: x in us_holidays)]
             stop_time_stats = apc.groupby(groupby).agg(stat_args)
             chunks.append(stop_time_stats)
             
         df = pd.concat(chunks)
         df.columns = df.columns.droplevel()
         df.reset_index(inplace=True)
+        
         self._apc_stop_time_stats = df
         return self._apc_stop_time_stats
         
-    def _apc_stop_time_stats_distributed(self, service_id=1, groupby=None, stat_args=None):
+    def _apc_stop_time_stats_distributed(self, weekday=True, holiday=False, groupby=None, stat_args=None):
         # defaults
         groupby = self._default_groupby if groupby==None else groupby
         stat_args= self._default_stat_args if stat_args==None else stat_args
         chunks = []
+        wait_queue = {}
+        to_merge = []
         i = 0
+        us_holidays = holidays.UnitedStates()
         
         # iterate through keys.  apc data is stored by month (or possibly other chunks)
         for key in self.apc_keys:
@@ -232,9 +258,10 @@ class stats():
 
             # create new attributes
             apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
-            
-            wait_queue = {}
-            to_merge = []
+            if weekday: 
+                apc = apc.loc[apc['weekday'].isin([0,1,2,3,4])]
+            if not holiday:
+                apc = apc.loc[~apc['DATE'].map(lambda x: x in us_holidays)]
             ifile, ofile = self.fg.next(), self.fg.next()
             dump_pickle(ifile, apc)
             job = self.cluster.submit(ifile, ofile, groupby, stat_args)
@@ -286,3 +313,83 @@ class stats():
         self._apc_stop_time_stats = df
         return self._apc_stop_time_stats
         
+    def match_apc_to_gtfs(self):
+        first_stops = self._apc_stop_time_stats.groupby(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP'])[['SEQ','STOP_AVL','meantime','size','stdtime']].first()
+        first_stops.loc[:,'match_flag'] = 0
+        file_idx, route_short_name, dir_ = None, None, None
+        unfound_routes = set()
+        for idx, feed in gtfs_feeds.iteritems():
+            feed.stop_times.loc[:,'scheduled_arrival_time'] = feed.stop_times['arrival_time'].map(lambda x: dt.timedelta(seconds=x))
+            feed.stop_times.loc[:,'scheduled_departure_time'] = feed.stop_times['departure_time'].map(lambda x: dt.timedelta(seconds=x))
+        for idx, first_stop in first_stops.iterrows():
+            if idx[0] != file_idx:
+                file_idx = idx[0]
+                feed = self.gtfs_feeds[file_idx]
+                routes = feed.routes
+            if idx[1] != route_short_name or idx[2] != dir_:
+                route_short_name = idx[1]
+                dir_ = idx[2]
+                route = routes.loc[routes['route_short_name'].eq(route_short_name)]
+                if len(route) == 0:
+                    try:
+                        route = routes.loc[routes['route_short_name'].eq(self.route_rebrand[route_short_name])]
+                    except Exception as e:
+                        self.log.debug(e)
+                        continue
+                if len(route) == 0:
+                    unfound_routes.add(route_short_name)
+                    continue
+                trips = feed.trips.loc[feed.trips['route_id'].eq(route.iloc[0]['route_id']) & 
+                                       feed.trips['direction_id'].eq(dir_)]
+                stop_times = feed.stop_times.loc[feed.stop_times['trip_id'].isin(trips['trip_id'])]
+            
+            start = first_stop['meantime']-first_stop['stdtime']
+            stop = first_stop['meantime']+first_stop['stdtime']
+            
+            matches = stop_times.loc[stop_times['stop_id'].eq(str(first_stop['STOP_AVL'])) & 
+                                     stop_times['scheduled_arrival_time'].between(start, stop)]
+            if len(matches) > 1:
+                self.log.debug('round multiple possible matches!')
+                self.log.debug(str(matches))
+                matches.loc[:,'diff'] = (matches['scheduled_arrival_time'] - first_stop['meantime']).map(lambda x: abs(x))
+                first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
+                first_stops.loc[idx,'trip_id'] = matches.loc[matches['diff'].idxmin(),'trip_id']
+                first_stops.loc[idx,'match_flag'] = 1
+            elif len(matches) == 0:
+                self.log.debug('found no possible matches for:')
+                self.log.debug(str(first_stop))
+                continue
+            else:
+                first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
+                first_stops.loc[idx,'trip_id'] = matches.iloc[0]['trip_id']
+        #self.gtfs_to_apc = first_stops.reset_index().loc[:,['file_idx','route_id','trip_id','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']]
+        self.apc_to_gtfs = first_stops.loc[:,['route_id','trip_id']]
+        return first_stops
+    
+    def make_stop_time_stats(self):
+        if self.apc_to_gtfs == None:
+            self.log.debug('need to map gtfs to apc first!')
+            return
+        if self._apc_stop_time_stats == None:
+            self.log.debug('need to create apc_stop_time_stats first!')
+            return
+        stop_time_stats = self._apc_stop_time_stats.set_index(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP'])
+        stop_time_stats.loc[:,'route_id'] = np.nan
+        stop_time_stats.loc[:,'trip_id'] = np.nan
+        stop_time_stats.update(self.apc_to_gtfs)
+        stop_time_stats.rename(columns={'meantime':'avg_arrival_time',
+                                        'stdtime':'stdev_arrival_time',
+                                        'size':'samples',
+                                        'STOP_AVL':'stop_id',
+                                        'SEQ':'stop_sequence'}, inplace=True)
+        stop_time_stats.loc[:,'scheduled_arrival_time'] = np.nan
+        stop_time_stats.loc[:,'scheduled_departure_time'] = np.nan
+        stop_time_stats = stop_time_stats.reset_index().set_index(['file_idx','trip_id','stop_id'])
+        for idx, feed in self.gtfs_feeds.iteritems():
+            stop_times = pd.DataFrame(feed.stop_times, copy=True)
+            stop_times.loc[:,'file_idx'] = idx
+            stop_times.set_index(['file_idx','trip_id','stop_id'], inplace=True)
+            stop_time_stats.update(stop_times.loc[:,['scheduled_arrival_time','scheduled_departure_time']])
+        stop_time_stats = stop_time_stats.reset_index().loc[:,['file_idx','trip_id','scheduled_arrival_time','scheduled_departure_time','avg_arrival_time','stdev_arrival_time','samples']]
+        self.stop_time_stats = stop_time_stats
+        return stop_time_stats
