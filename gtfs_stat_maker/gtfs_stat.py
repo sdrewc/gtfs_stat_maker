@@ -62,7 +62,7 @@ class stats():
         self.stop_time_stats = None
         
         self.gtfs_feeds = {}
-        self._gtfs_paths = gtfs_paths
+        self.gtfs_paths = gtfs_paths
         if isinstance(self.gtfs_paths, str):
             self.gtfs_paths = [self.gtfs_paths]
         self._load_gtfs_feeds()
@@ -318,7 +318,7 @@ class stats():
         first_stops.loc[:,'match_flag'] = 0
         file_idx, route_short_name, dir_ = None, None, None
         unfound_routes = set()
-        for idx, feed in gtfs_feeds.iteritems():
+        for idx, feed in self.gtfs_feeds.iteritems():
             feed.stop_times.loc[:,'scheduled_arrival_time'] = feed.stop_times['arrival_time'].map(lambda x: dt.timedelta(seconds=x))
             feed.stop_times.loc[:,'scheduled_departure_time'] = feed.stop_times['departure_time'].map(lambda x: dt.timedelta(seconds=x))
         for idx, first_stop in first_stops.iterrows():
@@ -343,34 +343,37 @@ class stats():
                                        feed.trips['direction_id'].eq(dir_)]
                 stop_times = feed.stop_times.loc[feed.stop_times['trip_id'].isin(trips['trip_id'])]
             
-            start = first_stop['meantime']-first_stop['stdtime']
-            stop = first_stop['meantime']+first_stop['stdtime']
-            
-            matches = stop_times.loc[stop_times['stop_id'].eq(str(first_stop['STOP_AVL'])) & 
-                                     stop_times['scheduled_arrival_time'].between(start, stop)]
-            if len(matches) > 1:
-                self.log.debug('round multiple possible matches!')
-                self.log.debug(str(matches))
-                matches.loc[:,'diff'] = (matches['scheduled_arrival_time'] - first_stop['meantime']).map(lambda x: abs(x))
-                first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
-                first_stops.loc[idx,'trip_id'] = matches.loc[matches['diff'].idxmin(),'trip_id']
-                first_stops.loc[idx,'match_flag'] = 1
-            elif len(matches) == 0:
-                self.log.debug('found no possible matches for:')
-                self.log.debug(str(first_stop))
-                continue
-            else:
-                first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
-                first_stops.loc[idx,'trip_id'] = matches.iloc[0]['trip_id']
+            for numdev in [1,2,3]:
+                start = first_stop['meantime']-numdev*first_stop['stdtime']
+                stop = first_stop['meantime']+numdev*first_stop['stdtime']
+                
+                matches = stop_times.loc[stop_times['stop_id'].eq(str(first_stop['STOP_AVL'])) & 
+                                         stop_times['scheduled_arrival_time'].between(start, stop)]
+                if len(matches) > 1:
+                    self.log.debug('round multiple possible matches!')
+                    self.log.debug(str(matches))
+                    matches.loc[:,'diff'] = (matches['scheduled_arrival_time'] - first_stop['meantime']).map(lambda x: abs(x))
+                    first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
+                    first_stops.loc[idx,'trip_id'] = matches.loc[matches['diff'].idxmin(),'trip_id']
+                    first_stops.loc[idx,'match_flag'] = 1
+                    break
+                elif len(matches) == 0:
+                    self.log.debug('found no possible matches for:')
+                    self.log.debug(str(first_stop))
+                    continue
+                else:
+                    first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
+                    first_stops.loc[idx,'trip_id'] = matches.iloc[0]['trip_id']
+                    break
         #self.gtfs_to_apc = first_stops.reset_index().loc[:,['file_idx','route_id','trip_id','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']]
         self.apc_to_gtfs = first_stops.loc[:,['route_id','trip_id']]
         return first_stops
     
     def make_stop_time_stats(self):
-        if self.apc_to_gtfs == None:
+        if not isinstance(self.apc_to_gtfs, pd.DataFrame):
             self.log.debug('need to map gtfs to apc first!')
             return
-        if self._apc_stop_time_stats == None:
+        if not isinstance(self._apc_stop_time_stats, pd.DataFrame):
             self.log.debug('need to create apc_stop_time_stats first!')
             return
         stop_time_stats = self._apc_stop_time_stats.set_index(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP'])
