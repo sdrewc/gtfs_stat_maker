@@ -7,7 +7,7 @@ import datetime as dt
 import partridge as ptg
 from itertools import izip
 sys.path.insert(0,os.path.dirname(os.path.realpath(__file__)))
-from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds
+from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds, datetime_to_timedelta
 import holidays
     
 class gtfs_to_apc():
@@ -350,16 +350,16 @@ class stats():
                 matches = stop_times.loc[stop_times['stop_id'].eq(str(first_stop['STOP_AVL'])) & 
                                          stop_times['scheduled_arrival_time'].between(start, stop)]
                 if len(matches) > 1:
-                    self.log.debug('round multiple possible matches!')
-                    self.log.debug(str(matches))
+                    #self.log.debug('round multiple possible matches!')
+                    #self.log.debug(str(matches))
                     matches.loc[:,'diff'] = (matches['scheduled_arrival_time'] - first_stop['meantime']).map(lambda x: abs(x))
                     first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
                     first_stops.loc[idx,'trip_id'] = matches.loc[matches['diff'].idxmin(),'trip_id']
                     first_stops.loc[idx,'match_flag'] = 1
                     break
                 elif len(matches) == 0:
-                    self.log.debug('found no possible matches for:')
-                    self.log.debug(str(first_stop))
+                    #self.log.debug('found no possible matches for:')
+                    #self.log.debug(str(first_stop))
                     continue
                 else:
                     first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
@@ -369,6 +369,11 @@ class stats():
         self.apc_to_gtfs = first_stops.loc[:,['route_id','trip_id']]
         return first_stops
     
+    def datetime_to_timedelta(d):
+        try:
+            return d - dt.datetime(d.year, d.month, d.day)
+        except:
+            return pd.NaT
     def make_stop_time_stats(self):
         if not isinstance(self.apc_to_gtfs, pd.DataFrame):
             self.log.debug('need to map gtfs to apc first!')
@@ -385,14 +390,19 @@ class stats():
                                         'size':'samples',
                                         'STOP_AVL':'stop_id',
                                         'SEQ':'stop_sequence'}, inplace=True)
-        stop_time_stats.loc[:,'scheduled_arrival_time'] = np.nan
-        stop_time_stats.loc[:,'scheduled_departure_time'] = np.nan
-        stop_time_stats = stop_time_stats.reset_index().set_index(['file_idx','trip_id','stop_id'])
+        stop_time_stats.loc[:,'scheduled_arrival_time'] = pd.NaT
+        stop_time_stats.loc[:,'scheduled_departure_time'] = pd.NaT
+        stop_time_stats.loc[:,'stop_id'] = stop_time_stats['stop_id'].astype('str')
+        stop_time_stats = stop_time_stats.reset_index().set_index(['file_idx','trip_id','stop_sequence','stop_id'])
+        #stop_time_stats.to_csv(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018Mar06.160558\stop_time_stats_provisional.csv')
+        #stop_time_stats.to_hdf(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018Mar06.160558\stop_time_stats_provisional.h5','data')
         for idx, feed in self.gtfs_feeds.iteritems():
             stop_times = pd.DataFrame(feed.stop_times, copy=True)
             stop_times.loc[:,'file_idx'] = idx
-            stop_times.set_index(['file_idx','trip_id','stop_id'], inplace=True)
-            stop_time_stats.update(stop_times.loc[:,['scheduled_arrival_time','scheduled_departure_time']])
+            stop_times.set_index(['file_idx','trip_id','stop_sequence','stop_id'], inplace=True)
+            stop_time_stats.update(stop_times)
+        stop_time_stats.loc[:,'scheduled_arrival_time'] = stop_time_stats['scheduled_arrival_time'].map(lambda x: datetime_to_timedelta(x))
+        stop_time_stats.loc[:,'scheduled_departure_time'] = stop_time_stats['scheduled_departure_time'].map(lambda x: datetime_to_timedelta(x))
         stop_time_stats = stop_time_stats.reset_index().loc[:,['file_idx','trip_id','scheduled_arrival_time','scheduled_departure_time','avg_arrival_time','stdev_arrival_time','samples']]
         self.stop_time_stats = stop_time_stats
         return stop_time_stats

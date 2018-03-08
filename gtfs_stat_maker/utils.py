@@ -53,6 +53,12 @@ def normalize_timedelta(series, zero_hour=0):
     else:
         return series
 
+def datetime_to_timedelta(d):
+        try:
+            return d - dt.datetime(d.year, d.month, d.day)
+        except:
+            return pd.NaT
+        
 def datetime_to_seconds(d):
         if not isinstance(d, dt.datetime):
             raise Exception("expected datetime, got %s" % (type(d)))
