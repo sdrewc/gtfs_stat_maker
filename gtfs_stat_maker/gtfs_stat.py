@@ -29,26 +29,65 @@ class gtfs_to_apc():
         self.trips = None
         self.stops = None
         self.routes = None
+
+class stop_time_stats_settings():
+    def __init__(self):
+        self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL']
+        self.stat_args = {'ARRIVAL_TIME':[meantime,stdtime,'size'],
+                                   'DEPARTURE_TIME':[meantime,stdtime]}
+        
+        self.rename = {('ARRIVAL_TIME','meantime'):'avg_arrival_time',
+                                ('ARRIVAL_TIME','stdtime'):'stdev_arrival_time',
+                                ('ARRIVAL_TIME','size'):'samples',
+                                ('DEPARTURE_TIME','meantime'):'avg_departure_time',
+                                ('DEPARTURE_TIME','stdtime'):'stdev_departure_time'
+                                }
+        
+        self.reagg_args = {'avg_arrival_time':{agg_mean:{'value_field':'avg_arrival_time',
+                                                                  'n_field':'samples'}},
+                                    'avg_departure_time':{agg_mean:{'value_field':'avg_departure_time',
+                                                                    'n_field':'samples'}},
+                                    'stdev_arrival_time':{agg_std:{'mean_field':'avg_arrival_time',
+                                                                   'std_field':'stdev_arrival_time',
+                                                                   'n_field':'samples'}},
+                                    'stdev_departure_time':{agg_std:{'mean_field':'avg_departure_time',
+                                                                     'std_field':'stdev_departure_time',
+                                                                     'n_field':'samples'}},
+                                    'samples':    np.sum}
         
 class stats():
     def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, nodes=None, logger=None, depends=None):
         self.apc_path = apc_hdf
         self.apc_keys = get_keys(self.apc_path)
-        self.date_ranges = None
+        self.calendar = None
         self.dow_by_service_id = None
         self.dow_count_by_service_id = None
         self.distributed = distributed
         self.config_file = config_file
         self.log = logger
         # APC Aggregations
-        self._default_groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL']
-        self._default_stat_args = {'ARRIVAL_TIME':[meantime,stdtime,'size']}
-        self._default_reagg_args = {'meantime':{agg_mean:{'value_field':'meantime',
-                                                          'n_field':'size'}},
-                                    'stdtime': {agg_std: {'mean_field':'meantime',
-                                                          'std_field':'stdtime',
-                                                          'n_field':'size'}},
-                                    'size':    np.sum}
+#        self._default_groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL']
+        self.sts_settings = stop_time_stats_settings()
+#        self._default_stat_args = {'ARRIVAL_TIME':[meantime,stdtime,'size'],
+#                                   'DEPARTURE_TIME',[meantime,stdtime]}
+#        self._default_rename = {('ARRIVAL_TIME','meantime'):'avg_arrival_time',
+#                                ('ARRIVAL_TIME','stdtime'):'stdev_arrival_time',
+#                                ('ARRIVAL_TIME','size'):'samples',
+#                                ('DEPARTURE_TIME','meantime'):'avg_departure_time',
+#                                ('DEPARTURE_TIME','stdtime'):'stdev_departure_time'
+#                                }
+#        self._default_reagg_args = {'meantime':{agg_mean:{'value_field':'meantime',
+#                                                          'n_field':'size'}},
+#                                    'stdtime': {agg_std: {'mean_field':'meantime',
+#                                                          'std_field':'stdtime',
+#                                                          'n_field':'size'}},
+#                                    'size':    np.sum}
+#        self._default_reagg_args = {'avg_arrival_time':{agg_mean:{'value_field':'meantime',
+#                                                          'n_field':'size'}},
+#                                    'stdtime': {agg_std: {'mean_field':'meantime',
+#                                                          'std_field':'stdtime',
+#                                                          'n_field':'size'}},
+#                                    'size':    np.sum}
         self.route_rebrand = {'8X':'8', '16X':'7X', '17':'57', '71':'7', '108':'25', '5L':'5R', '9L':'9R',
                               '14L':'14R', '28L':'28R', '38L':'38R', '71L':'7R'}
         
@@ -79,12 +118,16 @@ class stats():
         sids.loc[:,'weekday'] = sids['date'].map(lambda x: x.weekday())
         
         self.log.info('calculating date ranges and service_id stats')
-        self.date_ranges = sids.groupby('file_idx').agg({'date':['min','max']})
-        self.date_ranges.columns = ['start_date','end_date']
+        self.calendar = sids.groupby('file_idx').agg({'date':['min','max']})
+        self.calendar.columns = ['start_date','end_date']
         self.dow_count_by_service_id = sids.pivot_table(index=['file_idx','service_id'],
                                                         columns=['weekday'], aggfunc='count')
             
         self.dow_by_service_id = pd.notnull(self.dow_count_by_service_id) * 1
+        dow_by_file_idx = self.dow_by_service_id.reset_index().loc[self.dow_by_service_id.reset_index()['service_id'].isin(1,'1')].set_index('file_idx')
+        for n, day in izip(range(7),['monday','tuesday','wednesday','thursday','friday','saturday','sunday']):
+            self.calendar.loc[:,day] = dow_by_file_idx[:,n]
+            
         if self.distributed:
             self.log.info('setting up distributed processing')
             self._setup_distributed_processing(depends, nodes)
@@ -149,8 +192,8 @@ class stats():
         columns = [] # list of tuples to make an index or multiindex
         agg_dfs = [] # list of all the aggregations.  Each will be a series with an
                      # index defined by groupby
-        groupby = self._default_groupby if groupby==None else groupby
-        kwargs = self._default_reagg_args if kwargs=={} else kwargs
+        groupby = self.sts_settings.groupby if groupby==None else groupby
+        kwargs = self.sts_settings.reagg_args if kwargs=={} else kwargs
         self.log.debug('set groupby to %s' % (str(groupby)))
         self.log.debug('set kwargs to %s' % (str(kwargs)))
         
@@ -207,8 +250,8 @@ class stats():
     
     def _apc_stop_time_stats_sequential(self, weekday=True, holiday=False, groupby=None, stat_args=None):
         # apc data is stored by month (or possibly other chunks)
-        groupby = self._default_groupby if groupby==None else groupby
-        stat_args= self._default_stat_args if stat_args==None else stat_args
+        groupby = self.sts_settings.groupby if groupby==None else groupby
+        stat_args= self.sts_settings.stat_args if stat_args==None else stat_args
         chunks = []
         us_holidays = holidays.UnitedStates()
         
@@ -217,7 +260,7 @@ class stats():
             apc = pd.read_hdf(self.apc_path, key)
             
             self.log.debug('updating file_idx')
-            for idx, row in self.date_ranges.iterrows():
+            for idx, row in self.calendar.iterrows():
                 apc.loc[apc['DATE'].between(row['start_date'],row['end_date']),'file_idx'] = idx
 
             # create new attributes
@@ -238,8 +281,9 @@ class stats():
         
     def _apc_stop_time_stats_distributed(self, weekday=True, holiday=False, groupby=None, stat_args=None):
         # defaults
-        groupby = self._default_groupby if groupby==None else groupby
-        stat_args= self._default_stat_args if stat_args==None else stat_args
+        groupby = self.sts_settings.groupby if groupby==None else groupby
+        rename = self.sts_settings.rename
+        stat_args= self.sts_settings.stat_args if stat_args==None else stat_args
         chunks = []
         wait_queue = {}
         to_merge = []
@@ -253,7 +297,7 @@ class stats():
             
             # assign each record to the gtfs feed with corresponding date range
             self.log.debug('updating file_idx')
-            for idx, row in self.date_ranges.iterrows():
+            for idx, row in self.calendar.iterrows():
                 apc.loc[apc['DATE'].between(row['start_date'],row['end_date']),'file_idx'] = idx
 
             # create new attributes
@@ -308,8 +352,24 @@ class stats():
             chunks.append(load_pickle(fname))
         
         df = pd.concat(chunks)
-        df.columns = df.columns.droplevel()
+        #df.columns = df.columns.droplevel()
+        # rename columns from MultiIndex that results from complex aggregation
+        # to desired column names
+        new_cols = []
+        for c in df.columns:
+            try:
+                nc = rename[c]
+                new_cols.append(nc)
+            except Exception as e:
+                self.log.debug('failed to rename column %s' % c)
+                self.log.debug(e)
+        df.columns = new_cols
         df.reset_index(inplace=True)
+        #df.set_index('file_idx', inplace=True)
+        #df.loc[:,'start_date'] = self.calendar['start_date']
+        #df.loc[:,'end_date'] = self.calendar['end_date']
+        #df.reset_index(inplace=True)
+        df.rename(columns={'file_idx':'service_id'}, inplace=True)
         self._apc_stop_time_stats = df
         return self._apc_stop_time_stats
         
