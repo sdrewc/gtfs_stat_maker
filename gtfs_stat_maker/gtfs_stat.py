@@ -44,16 +44,16 @@ class stop_time_stats_settings():
                                 }
         
         self.reagg_args = {'avg_arrival_time':{agg_mean:{'value_field':'avg_arrival_time',
-                                                                  'n_field':'samples'}},
-                                    'avg_departure_time':{agg_mean:{'value_field':'avg_departure_time',
-                                                                    'n_field':'samples'}},
-                                    'stdev_arrival_time':{agg_std:{'mean_field':'avg_arrival_time',
-                                                                   'std_field':'stdev_arrival_time',
-                                                                   'n_field':'samples'}},
-                                    'stdev_departure_time':{agg_std:{'mean_field':'avg_departure_time',
-                                                                     'std_field':'stdev_departure_time',
-                                                                     'n_field':'samples'}},
-                                    'samples':    np.sum}
+                                                         'n_field':'samples'}},
+                           'avg_departure_time':{agg_mean:{'value_field':'avg_departure_time',
+                                                           'n_field':'samples'}},
+                           'stdev_arrival_time':{agg_std:{'mean_field':'avg_arrival_time',
+                                                          'std_field':'stdev_arrival_time',
+                                                          'n_field':'samples'}},
+                           'stdev_departure_time':{agg_std:{'mean_field':'avg_departure_time',
+                                                            'std_field':'stdev_departure_time',
+                                                            'n_field':'samples'}},
+                           'samples':    np.sum}
         
 class stats():
     def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, nodes=None, logger=None, depends=None):
@@ -122,11 +122,12 @@ class stats():
         self.calendar.columns = ['start_date','end_date']
         self.dow_count_by_service_id = sids.pivot_table(index=['file_idx','service_id'],
                                                         columns=['weekday'], aggfunc='count')
-            
+        self.dow_count_by_service_id.columns = self.dow_count_by_service_id.columns.droplevel()
         self.dow_by_service_id = pd.notnull(self.dow_count_by_service_id) * 1
-        dow_by_file_idx = self.dow_by_service_id.reset_index().loc[self.dow_by_service_id.reset_index()['service_id'].isin(1,'1')].set_index('file_idx')
+        dow_by_service_id = self.dow_by_service_id.reset_index()
+        dow_by_file_idx = dow_by_service_id.loc[dow_by_service_id['service_id'].isin([1,'1'])].set_index('file_idx')
         for n, day in izip(range(7),['monday','tuesday','wednesday','thursday','friday','saturday','sunday']):
-            self.calendar.loc[:,day] = dow_by_file_idx[:,n]
+            self.calendar.loc[:,day] = dow_by_file_idx.loc[:,n]
             
         if self.distributed:
             self.log.info('setting up distributed processing')
