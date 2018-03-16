@@ -370,7 +370,8 @@ class stats():
         #df.loc[:,'start_date'] = self.calendar['start_date']
         #df.loc[:,'end_date'] = self.calendar['end_date']
         #df.reset_index(inplace=True)
-        df.rename(columns={'file_idx':'service_id'}, inplace=True)
+        #df.rename(columns={'file_idx':'service_id'}, inplace=True)
+        df.loc[:,'service_id'] = df['file_idx']
         self._apc_stop_time_stats = df
         return self._apc_stop_time_stats
         
