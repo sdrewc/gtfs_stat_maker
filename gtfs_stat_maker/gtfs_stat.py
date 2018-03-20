@@ -34,7 +34,33 @@ class stop_time_stats_settings():
     def __init__(self):
         self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL']
         self.stat_args = {'ARRIVAL_TIME':[meantime,stdtime,'size'],
-                                   'DEPARTURE_TIME':[meantime,stdtime]}
+                          'DEPARTURE_TIME':[meantime,stdtime]}
+        
+        self.rename = {('ARRIVAL_TIME','meantime'):'avg_arrival_time',
+                       ('ARRIVAL_TIME','stdtime'):'stdev_arrival_time',
+                       ('ARRIVAL_TIME','size'):'samples',
+                       ('DEPARTURE_TIME','meantime'):'avg_departure_time',
+                       ('DEPARTURE_TIME','stdtime'):'stdev_departure_time'
+                       }
+        
+        self.reagg_args = {'avg_arrival_time':{agg_mean:{'value_field':'avg_arrival_time',
+                                                         'n_field':'samples'}},
+                           'avg_departure_time':{agg_mean:{'value_field':'avg_departure_time',
+                                                           'n_field':'samples'}},
+                           'stdev_arrival_time':{agg_std:{'mean_field':'avg_arrival_time',
+                                                          'std_field':'stdev_arrival_time',
+                                                          'n_field':'samples'}},
+                           'stdev_departure_time':{agg_std:{'mean_field':'avg_departure_time',
+                                                            'std_field':'stdev_departure_time',
+                                                            'n_field':'samples'}},
+                           'samples':    np.sum}
+                           
+class trip_stats_settings():
+    def __init__(self):
+        self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
+        self.order_by = 'SEQ'
+        self.stat_args = {'ARRIVAL_TIME':[meantime,stdtime,'size'],
+                          'DEPARTURE_TIME':[meantime,stdtime]}
         
         self.rename = {('ARRIVAL_TIME','meantime'):'avg_arrival_time',
                                 ('ARRIVAL_TIME','stdtime'):'stdev_arrival_time',
@@ -376,7 +402,9 @@ class stats():
         return self._apc_stop_time_stats
         
     def match_apc_to_gtfs(self):
-        first_stops = self._apc_stop_time_stats.groupby(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP'])[['SEQ','STOP_AVL','meantime','size','stdtime']].first()
+        group_columns = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
+        agg_columns = ['SEQ','STOP_AVL','avg_arrival_time','stdev_arrival_time']
+        first_stops = self._apc_stop_time_stats.groupby(group_columns)[agg_columns].first()
         first_stops.loc[:,'match_flag'] = 0
         file_idx, route_short_name, dir_ = None, None, None
         unfound_routes = set()
@@ -406,15 +434,15 @@ class stats():
                 stop_times = feed.stop_times.loc[feed.stop_times['trip_id'].isin(trips['trip_id'])]
             
             for numdev in [1,2,3]:
-                start = first_stop['meantime']-numdev*first_stop['stdtime']
-                stop = first_stop['meantime']+numdev*first_stop['stdtime']
+                start = first_stop['avg_arrival_time']-numdev*first_stop['stdev_arrival_time']
+                stop = first_stop['avg_arrival_time']+numdev*first_stop['stdev_arrival_time']
                 
                 matches = stop_times.loc[stop_times['stop_id'].eq(str(first_stop['STOP_AVL'])) & 
                                          stop_times['scheduled_arrival_time'].between(start, stop)]
                 if len(matches) > 1:
                     #self.log.debug('round multiple possible matches!')
                     #self.log.debug(str(matches))
-                    matches.loc[:,'diff'] = (matches['scheduled_arrival_time'] - first_stop['meantime']).map(lambda x: abs(x))
+                    matches.loc[:,'diff'] = (matches['scheduled_arrival_time'] - first_stop['avg_arrival_time']).map(lambda x: abs(x))
                     first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
                     first_stops.loc[idx,'trip_id'] = matches.loc[matches['diff'].idxmin(),'trip_id']
                     first_stops.loc[idx,'match_flag'] = 1
@@ -447,10 +475,7 @@ class stats():
         stop_time_stats.loc[:,'route_id'] = np.nan
         stop_time_stats.loc[:,'trip_id'] = np.nan
         stop_time_stats.update(self.apc_to_gtfs)
-        stop_time_stats.rename(columns={'meantime':'avg_arrival_time',
-                                        'stdtime':'stdev_arrival_time',
-                                        'size':'samples',
-                                        'STOP_AVL':'stop_id',
+        stop_time_stats.rename(columns={'STOP_AVL':'stop_id',
                                         'SEQ':'stop_sequence'}, inplace=True)
         stop_time_stats.loc[:,'scheduled_arrival_time'] = pd.NaT
         stop_time_stats.loc[:,'scheduled_departure_time'] = pd.NaT
@@ -465,6 +490,16 @@ class stats():
             stop_time_stats.update(stop_times)
         stop_time_stats.loc[:,'scheduled_arrival_time'] = stop_time_stats['scheduled_arrival_time'].map(lambda x: datetime_to_timedelta(x))
         stop_time_stats.loc[:,'scheduled_departure_time'] = stop_time_stats['scheduled_departure_time'].map(lambda x: datetime_to_timedelta(x))
-        stop_time_stats = stop_time_stats.reset_index().loc[:,['file_idx','trip_id','scheduled_arrival_time','scheduled_departure_time','avg_arrival_time','stdev_arrival_time','samples']]
+        stop_time_stats = stop_time_stats.reset_index().loc[:,['service_id',
+                                                               'trip_id',
+                                                               'stop_sequence',
+                                                               'stop_id',
+                                                               'scheduled_arrival_time',
+                                                               'scheduled_departure_time',
+                                                               'avg_arrival_time',
+                                                               'stdev_arrival_time',
+                                                               'avg_departure_time',
+                                                               'stdev_departure_time',
+                                                               'samples']]
         self.stop_time_stats = stop_time_stats
         return stop_time_stats
