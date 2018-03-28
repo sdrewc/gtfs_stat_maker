@@ -52,6 +52,48 @@ def dump_pickle(filename, data):
     f.close()
     return
 
+def proc_aggregate(infile, outfile, groupby, sortby, rename, agg_args):
+    import datetime as dt
+    import pandas as pd
+    import cPickle as pickle
+    
+    print "proc_stop_time_stats.loading"
+    data = load_pickle(infile)
+    print "proc_stop_time_stats.aggregating"
+    if sortby != None:
+        data.sort_values(by=sortby, inplace=True)
+    agg = data.groupby(groupby).agg(agg_args)
+    
+    if rename!=None:
+        print "renaming columns"
+        new_cols = []
+        for c in agg.columns:
+            try:
+                nc = rename[c]
+                new_cols.append(nc)
+            except Exception as e:
+                print 'failed to rename column %s' % c
+                print e
+            agg.columns = new_cols
+            
+    print "proc_stop_time_stats.dumping"
+    dump_pickle(outfile, agg)
+    print "proc_stop_time_stats.returning"
+    return outfile
+
+def proc_apply(infile, outfile, apply_args, axis=1):
+    import datetime as dt
+    import pandas as pd
+    import cPickle as pickle
+    
+    data = load_pickle(infile)
+    if not isinstance(apply_args, dict):
+        raise Exception(r'apply_args must be type (dict)')
+    for fname, apply_func in apply_args.iteritems():
+        data[fname] = data.apply(apply_func, axis=axis)
+    dump_pickle(outfile, data)
+    return outfile
+
 def proc_stop_time_stats(infile, outfile, groupby, stat_args):
     import datetime as dt
     import pandas as pd
