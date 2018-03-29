@@ -7,35 +7,25 @@ import datetime as dt
 import partridge as ptg
 from itertools import izip
 sys.path.insert(0,os.path.dirname(os.path.realpath(__file__)))
-from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds, datetime_to_timedelta
+from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds, datetime_to_timedelta, agg_trip_runtime
 import holidays
     
-class gtfs_to_apc():
-    def __init__(self, gtfs_route_cols=None, gtfs_trip_cols=None, gtfs_stop_time_cols=None, 
-                 apc_route_cols=None, apc_trip_cols=None, apc_stop_time_cols=None):
-        '''
-        User may provide columns that uniquely identify a gtfs route, trip, and stop, and
-        apc route, trip, and stop.  If no column names are provided, defaults will be used.
-        Defaults:
-            gtfs_route_cols = ['route_id']
-            gtfs_trip_cols = ['trip_id']
-            gtfs_stop_cols = ['stop_id']
-            
-        '''
-        self.trip_cols = ['gtfs.trip_id', 'apc.trip_id']
-        self.route_cols = []
-        self.stop_cols = []
-        
-        self.trips = None
-        self.stops = None
-        self.routes = None
+class match_apc_to_gtfs_settings():
+    pass
 
 class stop_time_stats_settings():
     def __init__(self):
+        # Set of unique identifiers for a route-stop in the APC data
         self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL']
+        
+        # Aggregations based on the above groupby
         self.stat_args = {'ARRIVAL_TIME':[meantime,stdtime,'size'],
                           'DEPARTURE_TIME':[meantime,stdtime]}
         
+        # Rename rules for aggregations to get to desired stop_time_stats names
+        # The "from" is either: 
+        #   1. the name of the original field that was aggregated, or
+        #   2. a tuple of (original field name, aggregation function name)                           
         self.rename = {('ARRIVAL_TIME','meantime'):'avg_arrival_time',
                        ('ARRIVAL_TIME','stdtime'):'stdev_arrival_time',
                        ('ARRIVAL_TIME','size'):'samples',
@@ -43,6 +33,8 @@ class stop_time_stats_settings():
                        ('DEPARTURE_TIME','stdtime'):'stdev_departure_time'
                        }
         
+        # Rules for reaggregating statistics.  The use case is when data has been
+        # aggregated in chunks, and you want to aggregate those chunks together
         self.reagg_args = {'avg_arrival_time':{agg_mean:{'value_field':'avg_arrival_time',
                                                          'n_field':'samples'}},
                            'avg_departure_time':{agg_mean:{'value_field':'avg_departure_time',
@@ -57,29 +49,44 @@ class stop_time_stats_settings():
                            
 class trip_stats_settings():
     def __init__(self):
-        self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
-        self.order_by = 'SEQ'
-        self.stat_args = {'ARRIVAL_TIME':[meantime,stdtime,'size'],
-                          'DEPARTURE_TIME':[meantime,stdtime]}
+        '''
+        trip_stats_settings contains arguments that will be used to manipulate apc and gtfs
+        data into the GTFS-STAT format.
         
-        self.rename = {('ARRIVAL_TIME','meantime'):'avg_arrival_time',
-                                ('ARRIVAL_TIME','stdtime'):'stdev_arrival_time',
-                                ('ARRIVAL_TIME','size'):'samples',
-                                ('DEPARTURE_TIME','meantime'):'avg_departure_time',
-                                ('DEPARTURE_TIME','stdtime'):'stdev_departure_time'
-                                }
+        order of operations:
+            1. for both apc and gtfs:
+                1.1 calculate any stop-level statistics (i.e. dwell time)
+                1.2 calculate trip-level statistics (i.e. run time)
+                1.3 aggregate trip-level statistics across all observations
+                1.4 if processed in chunks, reaggreagate individual chunks together
+            2. combine apc and gtfs
+            
+        '''
+        self.apc_groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
+        self.apc_sortby = ['SEQ']
+        self.apc_first_time = 'ARRIVAL_TIME'
+        self.apc_last_time = 'ARRIVAL_TIME' # using ARRIVAL_TIME for the endpoint to avoid including layover
+        self.apc_agg_args = {'ARRIVAL_TIME':['first','last','size'],
+                             'stopped_time':['sum']}
         
-        self.reagg_args = {'avg_arrival_time':{agg_mean:{'value_field':'avg_arrival_time',
-                                                         'n_field':'samples'}},
-                           'avg_departure_time':{agg_mean:{'value_field':'avg_departure_time',
-                                                           'n_field':'samples'}},
-                           'stdev_arrival_time':{agg_std:{'mean_field':'avg_arrival_time',
-                                                          'std_field':'stdev_arrival_time',
-                                                          'n_field':'samples'}},
-                           'stdev_departure_time':{agg_std:{'mean_field':'avg_departure_time',
-                                                            'std_field':'stdev_departure_time',
-                                                            'n_field':'samples'}},
-                           'samples':    np.sum}
+        self.apc_rename = {('ARRIVAL_TIME','first'):'first_arrival_time',
+                           ('ARRIVAL_TIME','last'):'last_arrival_time',
+                           ('ARRIVAL_TIME','size'):'samples',
+                           ('stopped_time','sum'):'observed_stopped_time'}
+        
+        apply_calc_runtime = lambda x: x['last_arrival_time'] - x['first_arrival_time']
+        apply_calc_movetime = lambda x: x['observed_runtime'] - x['observed_stopped_time']
+        self.apc_apply_args = {'observed_runtime':apply_calc_runtime,
+                           'observed_moving_time':apply_calc_movetime}
+        
+        self.gtfs_groupby = ['trip_id']
+        self.gtfs_sortby = ['stop_sequence']
+        self.gtfs_first_time = 'arrival_time'
+        self.gtfs_last_time = 'departure_time'
+        self.gtfs_stat_args = {'arrival_time':['first'],
+                               'departure_time':['last'],
+                               }
+        
         
 class stats():
     def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, nodes=None, logger=None, depends=None):
@@ -91,33 +98,17 @@ class stats():
         self.distributed = distributed
         self.config_file = config_file
         self.log = logger
+        
         # APC Aggregations
-#        self._default_groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','SEQ','STOP_AVL']
         self.sts_settings = stop_time_stats_settings()
-#        self._default_stat_args = {'ARRIVAL_TIME':[meantime,stdtime,'size'],
-#                                   'DEPARTURE_TIME',[meantime,stdtime]}
-#        self._default_rename = {('ARRIVAL_TIME','meantime'):'avg_arrival_time',
-#                                ('ARRIVAL_TIME','stdtime'):'stdev_arrival_time',
-#                                ('ARRIVAL_TIME','size'):'samples',
-#                                ('DEPARTURE_TIME','meantime'):'avg_departure_time',
-#                                ('DEPARTURE_TIME','stdtime'):'stdev_departure_time'
-#                                }
-#        self._default_reagg_args = {'meantime':{agg_mean:{'value_field':'meantime',
-#                                                          'n_field':'size'}},
-#                                    'stdtime': {agg_std: {'mean_field':'meantime',
-#                                                          'std_field':'stdtime',
-#                                                          'n_field':'size'}},
-#                                    'size':    np.sum}
-#        self._default_reagg_args = {'avg_arrival_time':{agg_mean:{'value_field':'meantime',
-#                                                          'n_field':'size'}},
-#                                    'stdtime': {agg_std: {'mean_field':'meantime',
-#                                                          'std_field':'stdtime',
-#                                                          'n_field':'size'}},
-#                                    'size':    np.sum}
+        self.ts_settings = trip_stats_settings()
+        
         self.route_rebrand = {'8X':'8', '16X':'7X', '17':'57', '71':'7', '108':'25', '5L':'5R', '9L':'9R',
                               '14L':'14R', '28L':'28R', '38L':'38R', '71L':'7R'}
         
         self._apc_stop_time_stats = None
+        self._apc_pickle_files = None
+        self._apc_trip_stats = None
         
         # GTFS-STAT
         self.gtfs_to_apc = None 
@@ -175,11 +166,11 @@ class stats():
         self.log.debug('setting up job cluster')
         self._default_depends = [meantime, stdtime, load_pickle, dump_pickle, __file__, utils]
         self.depends = self._default_depends if depends==None else depends
-        self.cluster = dispy.JobCluster(proc_stop_time_stats, 
-                                        callback=job_callback, 
-                                        depends=self.depends,
-                                        nodes=self.config.nodes, 
-                                        loglevel=logging.info)
+        #self.cluster = dispy.JobCluster(proc_stop_time_stats, 
+        #                                callback=job_callback, 
+        #                                depends=self.depends,
+        #                                nodes=self.config.nodes, 
+        #                                loglevel=logging.info)
         self.log.debug('setting up filename generator')
         self.fg = filename_generator(r'C:\Temp\tmp_gtfs_stat')
         self.log.debug('setting up globals')
@@ -271,14 +262,15 @@ class stats():
         df = pd.DataFrame(index=agg_dfs[0].index, columns=mi)    
         for col, agg in izip(mi, agg_dfs):
             df.loc[:,col] = agg
-        #df.reset_index(inplace=True)
+            
         self._apc_stop_time_stats = df.reset_index()
         return self._apc_stop_time_stats
     
     def _apc_stop_time_stats_sequential(self, weekday=True, holiday=False, groupby=None, stat_args=None):
         # apc data is stored by month (or possibly other chunks)
         groupby = self.sts_settings.groupby if groupby==None else groupby
-        stat_args= self.sts_settings.stat_args if stat_args==None else stat_args
+        rename = self.sts_settings.rename
+        stat_args = self.sts_settings.stat_args if stat_args==None else stat_args
         chunks = []
         us_holidays = holidays.UnitedStates()
         
@@ -300,7 +292,17 @@ class stats():
             chunks.append(stop_time_stats)
             
         df = pd.concat(chunks)
-        df.columns = df.columns.droplevel()
+        # rename columns from MultiIndex that results from complex aggregation
+        # to desired column names
+        new_cols = []
+        for c in df.columns:
+            try:
+                nc = rename[c]
+                new_cols.append(nc)
+            except Exception as e:
+                self.log.debug('failed to rename column %s' % c)
+                self.log.debug(e)
+        df.columns = new_cols
         df.reset_index(inplace=True)
         
         self._apc_stop_time_stats = df
@@ -310,7 +312,7 @@ class stats():
         # defaults
         groupby = self.sts_settings.groupby if groupby==None else groupby
         rename = self.sts_settings.rename
-        stat_args= self.sts_settings.stat_args if stat_args==None else stat_args
+        stat_args = self.sts_settings.stat_args if stat_args==None else stat_args
         chunks = []
         wait_queue = {}
         to_merge = []
@@ -379,7 +381,6 @@ class stats():
             chunks.append(load_pickle(fname))
         
         df = pd.concat(chunks)
-        #df.columns = df.columns.droplevel()
         # rename columns from MultiIndex that results from complex aggregation
         # to desired column names
         new_cols = []
@@ -392,12 +393,8 @@ class stats():
                 self.log.debug(e)
         df.columns = new_cols
         df.reset_index(inplace=True)
-        #df.set_index('file_idx', inplace=True)
-        #df.loc[:,'start_date'] = self.calendar['start_date']
-        #df.loc[:,'end_date'] = self.calendar['end_date']
-        #df.reset_index(inplace=True)
-        #df.rename(columns={'file_idx':'service_id'}, inplace=True)
         df.loc[:,'service_id'] = df['file_idx']
+        
         self._apc_stop_time_stats = df
         return self._apc_stop_time_stats
         
@@ -455,7 +452,6 @@ class stats():
                     first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
                     first_stops.loc[idx,'trip_id'] = matches.iloc[0]['trip_id']
                     break
-        #self.gtfs_to_apc = first_stops.reset_index().loc[:,['file_idx','route_id','trip_id','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']]
         self.apc_to_gtfs = first_stops.loc[:,['route_id','trip_id']]
         return first_stops
     
@@ -481,13 +477,13 @@ class stats():
         stop_time_stats.loc[:,'scheduled_departure_time'] = pd.NaT
         stop_time_stats.loc[:,'stop_id'] = stop_time_stats['stop_id'].astype('str')
         stop_time_stats = stop_time_stats.reset_index().set_index(['file_idx','trip_id','stop_sequence','stop_id'])
-        #stop_time_stats.to_csv(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018Mar06.160558\stop_time_stats_provisional.csv')
-        #stop_time_stats.to_hdf(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018Mar06.160558\stop_time_stats_provisional.h5','data')
+
         for idx, feed in self.gtfs_feeds.iteritems():
             stop_times = pd.DataFrame(feed.stop_times, copy=True)
             stop_times.loc[:,'file_idx'] = idx
             stop_times.set_index(['file_idx','trip_id','stop_sequence','stop_id'], inplace=True)
             stop_time_stats.update(stop_times)
+            
         stop_time_stats.loc[:,'scheduled_arrival_time'] = stop_time_stats['scheduled_arrival_time'].map(lambda x: datetime_to_timedelta(x))
         stop_time_stats.loc[:,'scheduled_departure_time'] = stop_time_stats['scheduled_departure_time'].map(lambda x: datetime_to_timedelta(x))
         stop_time_stats = stop_time_stats.reset_index().loc[:,['service_id',
@@ -503,3 +499,188 @@ class stats():
                                                                'samples']]
         self.stop_time_stats = stop_time_stats
         return stop_time_stats
+
+    def apc_trip_stats(self, weekday=True, holiday=False, groupby=None, sortby=None, rename=None, agg_args=None, apply_args=None):
+        '''
+        Aggregates stop_time_stats into trip_stats
+        Requires self.stop_times_stats to exist
+        '''
+        groupby = self.ts_settings.apc_groupby if groupby==None else groupby
+        sortby = self.ts_settings.apc_sortby if sortby==None else sortby
+        rename = self.ts_settings.apc_rename if rename==None else rename
+        agg_args = self.ts_settings.apc_agg_args if agg_args==None else agg_args
+        apply_args = self.ts_settings.apc_apply_args if apply_args==None else apply_args
+        
+        # prep apc data if it has not already been done.
+        if self._apc_pickle_files==None:
+            self._prep_apc_pickle_files(weekday, holiday)
+            
+        if self.distributed:
+            self._apc_trip_stats_distributed(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
+        else:
+            self._apc_trip_stats_sequential(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
+        return self._apc_stop_time_stats
+        
+    def _apc_trip_stats_distributed(self, weekday, holiday, groupby, sortby, rename, agg_args, apply_args):
+        from dispy_processing_utils import proc_aggregate, proc_apply
+        
+        # submit aggregate jobs
+        self.log.debug('creating iterator for aggregation jobs')
+        agg_iter = self._iter_aggregate_job(groupby, sortby, rename, agg_args)
+        self.log.debug('distributing aggregate jobs')
+        results = self._distribute(proc_aggregate, agg_iter)
+        
+        self.log.debug('creating iterator for apply jobs')
+        apply_iter = self._iter_apply_job(results, apply_args)
+        self.log.debug('distributing apply jobs')
+        results = self._distribute(proc_apply, apply_iter)
+        
+        dfs = []
+        for result in results:
+            df = load_pickle(result)
+            dfs.append(df)
+        apc_trip_stats = pd.concat(dfs)
+        self._apc_trip_stats = apc_trip_stats
+        return apc_trip_stats
+        
+    # job argument iterators
+    def _iter_aggregate_job(self, groupby, sortby, rename, agg_args):
+        for key in self.apc_keys:
+            #self.log.debug(self._apc_pickle_files)
+            #self.log.debug(self._apc_pickle_files[key])
+            ifile = self._apc_pickle_files[key]
+            ofile = self.fg.next()
+            yield (ifile, ofile, groupby, sortby, rename, agg_args)
+            
+    def _iter_apply_job(self, files, apply_args):
+        for ifile in files:
+            ofile = self.fg.next()
+            yield (ifile, ofile, apply_args)
+
+    def _prep_apc_pickle_files(self, weekday, holiday):
+        apc_pickle_files = {}
+        us_holidays = holidays.UnitedStates()
+        for key in self.apc_keys:
+            self.log.debug('reading file %s, key %s' % (self.apc_path, key))
+            apc = pd.read_hdf(self.apc_path, key)
+            
+            # assign each record to the gtfs feed with corresponding date range
+            self.log.debug('updating file_idx')
+            for idx, row in self.calendar.iterrows():
+                apc.loc[apc['DATE'].between(row['start_date'],row['end_date']),'file_idx'] = idx
+                
+            # create new attributes
+            apc.loc[:,'stopped_time'] = apc['DEPARTURE_TIME'] - apc['ARRIVAL_TIME']
+            apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
+            if weekday: 
+                apc = apc.loc[apc['weekday'].isin([0,1,2,3,4])]
+            if not holiday:
+                apc = apc.loc[~apc['DATE'].map(lambda x: x in us_holidays)]
+            ifile = self.fg.next()
+            dump_pickle(ifile, apc)
+            apc_pickle_files[key] = ifile
+        self._apc_pickle_files = apc_pickle_files
+        return apc_pickle_files
+
+#    def _iter_apc_pickle_job(self, weekday, holiday):
+#        for key in self.apc_keys:
+#            yield (key, weekday, holiday)
+#            
+#    def _prep_apc_pickle_files(self, weekday, holiday):
+#        apc_pickle_files = {}
+#        iter_apc_job = self._iter_apc_pickle_job(weekday, holiday)
+#        results = self._distribute(self._proc_apc_pickle, iter_apc_job)
+#        for key, ifile in results:
+#            apc_pickle_files[key] = ifile
+#        self._apc_pickle_files = apc_pickle_files
+#        return apc_pickle_files
+#    
+#    def _proc_apc_pickle(ofile, path, key, calendar, weekday, holiday):
+#        import holidays
+#        import pandas as pd
+#        import cPickle as pickle
+#        import datetime as dt
+#        
+#        us_holidays = holidays.UnitedStates()
+#        #self.log.debug('reading file %s, key %s' % (self.apc_path, key))
+#        apc = pd.read_hdf(path, key)
+#        
+#        # assign each record to the gtfs feed with corresponding date range
+#        #self.log.debug('updating file_idx')
+#        for idx, row in calendar.iterrows():
+#            apc.loc[apc['DATE'].between(row['start_date'],row['end_date']),'file_idx'] = idx
+#            
+#        # create new attributes
+#        apc.loc[:,'stopped_time'] = apc['DEPARTURE_TIME'] - apc['ARRIVAL_TIME']
+#        apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
+#        if weekday: 
+#            apc = apc.loc[apc['weekday'].isin([0,1,2,3,4])]
+#        if not holiday:
+#            apc = apc.loc[~apc['DATE'].map(lambda x: x in us_holidays)]
+#        dump_pickle(ofile, apc)
+#        return (key, ofile)
+    
+    def _distribute(self, process, job_iter, depends=[]):
+        # set up cluster
+        cluster = dispy.JobCluster(process, 
+                                   callback=job_callback,
+                                   depends=self.depends+depends,
+                                   nodes=self.config.nodes,
+                                   loglevel=logging.info,
+                                   )
+        wait_queue = {}
+        results = []
+        i = 1
+        for args in job_iter:
+            self.log.debug('process: %s' % process.__name__)
+            self.log.debug('args: %s' % str(args))
+            job = cluster.submit(*args)
+            self.log.debug("submitting %s job %d" % (process.__name__, i))
+            jobs_cond.acquire()
+            job.id = i
+            if job.status == dispy.DispyJob.Created or job.status == dispy.DispyJob.Running:
+                submit_queue[i] = job
+                # wait for queue to fall before lower bound before submitting another job
+                if len(submit_queue) >= upper_bound:
+                    while len(submit_queue) > lower_bound:
+                        jobs_cond.wait()
+            jobs_cond.release()
+            
+            wait_queue[i] = job
+            pop_ids = []
+            for jobid, job in wait_queue.iteritems():
+                if job.status == dispy.DispyJob.Finished:
+                    self.log.debug("finished job %d" % jobid)
+                    result = job.result
+                    pop_ids.append(jobid)
+                    results.append(result)
+                    #print_dispy_job_error(job)
+                    self.log.debug('- %s' % job.stderr)
+                    self.log.debug('- %s' % job.stdout)
+                    self.log.debug('- %s' % job.exception)
+                elif job.status in [dispy.DispyJob.Abandoned, dispy.DispyJob.Cancelled,
+                                    dispy.DispyJob.Terminated]:
+                    print_dispy_job_error(job)
+            for jobid in pop_ids:
+                wait_queue.pop(jobid)
+
+            i += 1
+        pop_ids = []
+        self.log.debug('cleaning up remaining jobs')
+        for jobid, job in wait_queue.iteritems():
+            try:
+                result = job()
+                self.log.debug("finished job %d" % jobid)
+                pop_ids.append(jobid)
+                results.append(result)
+                self.log.debug('- %s' % job.stderr)
+                self.log.debug('- %s' % job.stdout)
+                self.log.debug('- %s' % job.exception)
+                #print_dispy_job_error(job)
+            except Exception as e:
+                self.log.warn(e)
+                print_dispy_job_error(job)
+        for jobid in pop_ids:
+            wait_queue.pop(jobid)
+        
+        return results
