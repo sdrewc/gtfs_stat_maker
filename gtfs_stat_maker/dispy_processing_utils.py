@@ -57,15 +57,15 @@ def proc_aggregate(infile, outfile, groupby, sortby, rename, agg_args):
     import pandas as pd
     import cPickle as pickle
     
-    print "proc_stop_time_stats.loading"
+    print "proc_aggregate.loading"
     data = load_pickle(infile)
-    print "proc_stop_time_stats.aggregating"
+    print "proc_aggregate.aggregating"
     if sortby != None:
         data.sort_values(by=sortby, inplace=True)
     agg = data.groupby(groupby).agg(agg_args)
     
     if rename!=None:
-        print "renaming columns"
+        print "proc_aggregate.renaming columns"
         new_cols = []
         for c in agg.columns:
             try:
@@ -74,23 +74,27 @@ def proc_aggregate(infile, outfile, groupby, sortby, rename, agg_args):
             except Exception as e:
                 print 'failed to rename column %s' % c
                 print e
-            agg.columns = new_cols
+        agg.columns = new_cols
             
-    print "proc_stop_time_stats.dumping"
+    print "proc_aggregate.dumping"
     dump_pickle(outfile, agg)
-    print "proc_stop_time_stats.returning"
+    print "proc_aggregate.returning"
     return outfile
 
-def proc_apply(infile, outfile, apply_args, axis=1):
+def proc_apply(infile, outfile, apply_args, axis):
     import datetime as dt
     import pandas as pd
     import cPickle as pickle
     
+    print "proc_apply.loading"
     data = load_pickle(infile)
+    print "proc_apply.applying"
     if not isinstance(apply_args, dict):
         raise Exception(r'apply_args must be type (dict)')
     for fname, apply_func in apply_args.iteritems():
+        print "proc_apply.applying.%s" % (apply_func.__name__)
         data[fname] = data.apply(apply_func, axis=axis)
+    print "proc_apply.dumping"
     dump_pickle(outfile, data)
     return outfile
 

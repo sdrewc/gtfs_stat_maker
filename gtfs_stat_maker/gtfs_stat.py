@@ -7,7 +7,7 @@ import datetime as dt
 import partridge as ptg
 from itertools import izip
 sys.path.insert(0,os.path.dirname(os.path.realpath(__file__)))
-from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds, datetime_to_timedelta, agg_trip_runtime
+from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds, datetime_to_timedelta, agg_trip_runtime, apply_calc_runtime, apply_calc_movetime
 import holidays
     
 class match_apc_to_gtfs_settings():
@@ -74,8 +74,6 @@ class trip_stats_settings():
                            ('ARRIVAL_TIME','size'):'samples',
                            ('stopped_time','sum'):'observed_stopped_time'}
         
-        apply_calc_runtime = lambda x: x['last_arrival_time'] - x['first_arrival_time']
-        apply_calc_movetime = lambda x: x['observed_runtime'] - x['observed_stopped_time']
         self.apc_apply_args = {'observed_runtime':apply_calc_runtime,
                            'observed_moving_time':apply_calc_movetime}
         
@@ -164,7 +162,7 @@ class stats():
         self.log.debug('reading config for distributed processing')
         self.config = config(self.config_file, nodes)
         self.log.debug('setting up job cluster')
-        self._default_depends = [meantime, stdtime, load_pickle, dump_pickle, __file__, utils]
+        self._default_depends = [meantime, stdtime, load_pickle, dump_pickle, __file__, utils]#, apply_calc_runtime, apply_calc_movetime
         self.depends = self._default_depends if depends==None else depends
         #self.cluster = dispy.JobCluster(proc_stop_time_stats, 
         #                                callback=job_callback, 
@@ -519,7 +517,7 @@ class stats():
             self._apc_trip_stats_distributed(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
         else:
             self._apc_trip_stats_sequential(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
-        return self._apc_stop_time_stats
+        return self._apc_trip_stats
         
     def _apc_trip_stats_distributed(self, weekday, holiday, groupby, sortby, rename, agg_args, apply_args):
         from dispy_processing_utils import proc_aggregate, proc_apply
@@ -529,12 +527,12 @@ class stats():
         agg_iter = self._iter_aggregate_job(groupby, sortby, rename, agg_args)
         self.log.debug('distributing aggregate jobs')
         results = self._distribute(proc_aggregate, agg_iter)
-        
+        self.log.debug(str(results))
         self.log.debug('creating iterator for apply jobs')
         apply_iter = self._iter_apply_job(results, apply_args)
         self.log.debug('distributing apply jobs')
         results = self._distribute(proc_apply, apply_iter)
-        
+        self.log.debug(str(results))
         dfs = []
         for result in results:
             df = load_pickle(result)
@@ -542,7 +540,51 @@ class stats():
         apc_trip_stats = pd.concat(dfs)
         self._apc_trip_stats = apc_trip_stats
         return apc_trip_stats
+      
+    def gtfs_trip_stats(self, weekday=True, holiday=False, groupby=None, sortby=None, rename=None, agg_args=None, apply_args=None):
+        '''
+        Aggregates stop_time_stats into trip_stats
+        Requires self.stop_times_stats to exist
+        '''
+        groupby = self.ts_settings.gtfs_groupby if groupby==None else groupby
+        sortby = self.ts_settings.gtfs_sortby if sortby==None else sortby
+        rename = self.ts_settings.gtfs_rename if rename==None else rename
+        agg_args = self.ts_settings.gtfs_agg_args if agg_args==None else agg_args
+        apply_args = self.ts_settings.gtfs_apply_args if apply_args==None else apply_args
         
+        # prep apc data if it has not already been done.
+        #if self._apc_pickle_files==None:
+        #    self._prep_apc_pickle_files(weekday, holiday)
+            
+        if self.distributed:
+            self._gtfs_trip_stats_distributed(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
+        else:
+            self._gtfs_trip_stats_sequential(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
+        return self._gtfs_trip_stats
+        
+    def _gtfs_trip_stats_distributed(self, weekday, holiday, groupby, sortby, rename, agg_args, apply_args):
+        from dispy_processing_utils import proc_aggregate, proc_apply
+        
+        # submit aggregate jobs
+        self.log.debug('creating iterator for aggregation jobs')
+        agg_iter = self._iter_aggregate_job(groupby, sortby, rename, agg_args)
+        self.log.debug('distributing aggregate jobs')
+        results = self._distribute(proc_aggregate, agg_iter)
+        self.log.debug(str(results))
+        self.log.debug('creating iterator for apply jobs')
+        apply_iter = self._iter_apply_job(results, apply_args)
+        self.log.debug('distributing apply jobs')
+        results = self._distribute(proc_apply, apply_iter)
+        self.log.debug(str(results))
+        dfs = []
+        for result in results:
+            df = load_pickle(result)
+            dfs.append(df)
+        apc_trip_stats = pd.concat(dfs)
+        self._apc_trip_stats = apc_trip_stats
+        return apc_trip_stats        
+
+
     # job argument iterators
     def _iter_aggregate_job(self, groupby, sortby, rename, agg_args):
         for key in self.apc_keys:
@@ -552,10 +594,10 @@ class stats():
             ofile = self.fg.next()
             yield (ifile, ofile, groupby, sortby, rename, agg_args)
             
-    def _iter_apply_job(self, files, apply_args):
+    def _iter_apply_job(self, files, apply_args, axis=1):
         for ifile in files:
             ofile = self.fg.next()
-            yield (ifile, ofile, apply_args)
+            yield (ifile, ofile, apply_args, axis)
 
     def _prep_apc_pickle_files(self, weekday, holiday):
         apc_pickle_files = {}
@@ -581,44 +623,6 @@ class stats():
             apc_pickle_files[key] = ifile
         self._apc_pickle_files = apc_pickle_files
         return apc_pickle_files
-
-#    def _iter_apc_pickle_job(self, weekday, holiday):
-#        for key in self.apc_keys:
-#            yield (key, weekday, holiday)
-#            
-#    def _prep_apc_pickle_files(self, weekday, holiday):
-#        apc_pickle_files = {}
-#        iter_apc_job = self._iter_apc_pickle_job(weekday, holiday)
-#        results = self._distribute(self._proc_apc_pickle, iter_apc_job)
-#        for key, ifile in results:
-#            apc_pickle_files[key] = ifile
-#        self._apc_pickle_files = apc_pickle_files
-#        return apc_pickle_files
-#    
-#    def _proc_apc_pickle(ofile, path, key, calendar, weekday, holiday):
-#        import holidays
-#        import pandas as pd
-#        import cPickle as pickle
-#        import datetime as dt
-#        
-#        us_holidays = holidays.UnitedStates()
-#        #self.log.debug('reading file %s, key %s' % (self.apc_path, key))
-#        apc = pd.read_hdf(path, key)
-#        
-#        # assign each record to the gtfs feed with corresponding date range
-#        #self.log.debug('updating file_idx')
-#        for idx, row in calendar.iterrows():
-#            apc.loc[apc['DATE'].between(row['start_date'],row['end_date']),'file_idx'] = idx
-#            
-#        # create new attributes
-#        apc.loc[:,'stopped_time'] = apc['DEPARTURE_TIME'] - apc['ARRIVAL_TIME']
-#        apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
-#        if weekday: 
-#            apc = apc.loc[apc['weekday'].isin([0,1,2,3,4])]
-#        if not holiday:
-#            apc = apc.loc[~apc['DATE'].map(lambda x: x in us_holidays)]
-#        dump_pickle(ofile, apc)
-#        return (key, ofile)
     
     def _distribute(self, process, job_iter, depends=[]):
         # set up cluster
@@ -682,5 +686,5 @@ class stats():
                 print_dispy_job_error(job)
         for jobid in pop_ids:
             wait_queue.pop(jobid)
-        
+        cluster.close()
         return results

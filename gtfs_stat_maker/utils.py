@@ -37,6 +37,12 @@ def stdtime(series, ignore_date=True, normalize=True, zero_hour=3):
         series = normalize_timedelta(series, zero_hour)
     return series.std()
 
+def apply_calc_runtime(x):
+    return x['last_arrival_time'] - x['first_arrival_time']
+
+def apply_calc_movetime(x): 
+    return x['observed_runtime'] - x['observed_stopped_time']
+        
 def normalize_timedelta(series, zero_hour=0):
     '''
     Normalize a timedelta series around a zero hour
