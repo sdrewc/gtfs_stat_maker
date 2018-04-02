@@ -62,8 +62,8 @@ class trip_stats_settings():
             2. combine apc and gtfs
             
         '''
-        self.apc_groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
-        self.apc_sortby = ['SEQ']
+        self.apc_groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','DATE','TRIP']
+        self.apc_sortby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','DATE','TRIP','SEQ']
         self.apc_first_time = 'ARRIVAL_TIME'
         self.apc_last_time = 'ARRIVAL_TIME' # using ARRIVAL_TIME for the endpoint to avoid including layover
         self.apc_agg_args = {'ARRIVAL_TIME':['first','last','size'],
@@ -647,7 +647,9 @@ class stats():
                 # wait for queue to fall before lower bound before submitting another job
                 if len(submit_queue) >= upper_bound:
                     while len(submit_queue) > lower_bound:
+                        print "waiting"
                         jobs_cond.wait()
+                        print "done waiting"
             jobs_cond.release()
             
             wait_queue[i] = job
