@@ -245,9 +245,6 @@ class stats():
         for column, arg in kwargs.iteritems():
             if isinstance(arg, dict):
                 for aggfunc, kas in arg.iteritems():
-                    #self.log.debug('column: %s' % (column))
-                    #self.log.debug('aggfunc: %s' % (aggfunc))
-                    #self.log.debug('kwargs: %s' % (str(kas)))
                     if len(arg) > 1:
                         columns.append((column,aggfunc.__name__))
                     else:
@@ -261,8 +258,6 @@ class stats():
                     agg_dfs.append(agg)            
             elif isinstance(arg, list):
                 for aggfunc in arg:
-                    #self.log.debug('column: %s' % (column))
-                    #self.log.debug('aggfunc: %s' % (str(aggfunc)))
                     if len(arg) > 1:
                         columns.append((column,aggfunc.__name__))
                     else:
@@ -273,8 +268,6 @@ class stats():
                         agg = grouped.apply(aggfunc)
                     agg_dfs.append(agg)
             else:
-                #self.log.debug('column: %s' % (column))
-                #self.log.debug('aggfunc: %s' % (str(arg)))
                 columns.append((column,))
                 try:
                     agg = grouped.agg({column:arg})
@@ -283,7 +276,6 @@ class stats():
                 agg_dfs.append(agg)
         
         self.log.debug('found %s column names for %s aggregations' % (len(columns), len(agg_dfs)))
-        #self.log.debug('columns: %s' % str(columns))
         mi = pd.MultiIndex.from_tuples(columns)
         df = pd.DataFrame(index=agg_dfs[0].index, columns=mi)    
         for col, agg in izip(mi, agg_dfs):
@@ -463,16 +455,12 @@ class stats():
                 matches = stop_times.loc[stop_times['stop_id'].eq(str(first_stop['STOP_AVL'])) & 
                                          stop_times['scheduled_arrival_time'].between(start, stop)]
                 if len(matches) > 1:
-                    #self.log.debug('round multiple possible matches!')
-                    #self.log.debug(str(matches))
                     matches.loc[:,'diff'] = (matches['scheduled_arrival_time'] - first_stop['avg_arrival_time']).map(lambda x: abs(x))
                     first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
                     first_stops.loc[idx,'trip_id'] = matches.loc[matches['diff'].idxmin(),'trip_id']
                     first_stops.loc[idx,'match_flag'] = 1
                     break
                 elif len(matches) == 0:
-                    #self.log.debug('found no possible matches for:')
-                    #self.log.debug(str(first_stop))
                     continue
                 else:
                     first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
@@ -708,8 +696,6 @@ class stats():
         results = []
         i = 1
         for args in job_iter:
-#            self.log.debug('process: %s' % process.__name__)
-#            self.log.debug('args: %s' % str(args))
             job = cluster.submit(*args)
             self.log.debug("submitting %s job %d" % (process.__name__, i))
             jobs_cond.acquire()
