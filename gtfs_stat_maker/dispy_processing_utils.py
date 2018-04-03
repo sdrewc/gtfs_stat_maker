@@ -92,8 +92,12 @@ def proc_apply(infile, outfile, apply_args, axis):
     if not isinstance(apply_args, dict):
         raise Exception(r'apply_args must be type (dict)')
     for fname, apply_func in apply_args.iteritems():
-        print "proc_apply.applying.%s" % (apply_func.__name__)
-        data[fname] = data.apply(apply_func, axis=axis)
+        if isinstance(apply_func, list):
+            print "proc_apply.applying.%s" % (apply_func[0].__name__)
+            data[fname] = data.apply(apply_func[0], axis=axis, **apply_func[1])
+        else:
+            print "proc_apply.applying.%s" % (apply_func.__name__)
+            data[fname] = data.apply(apply_func, axis=axis)
     print "proc_apply.dumping"
     dump_pickle(outfile, data)
     return outfile
