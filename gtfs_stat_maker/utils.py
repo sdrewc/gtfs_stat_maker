@@ -37,6 +37,9 @@ def stdtime(series, ignore_date=True, normalize=True, zero_hour=3):
         series = normalize_timedelta(series, zero_hour)
     return series.std()
 
+def apply_diff(x, val1, val2):
+    return x[val1] - x[val2]
+
 def apply_calc_runtime(x):
     return x['last_arrival_time'] - x['first_arrival_time']
 
