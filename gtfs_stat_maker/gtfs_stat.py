@@ -7,7 +7,7 @@ import datetime as dt
 import partridge as ptg
 from itertools import izip
 sys.path.insert(0,os.path.dirname(os.path.realpath(__file__)))
-from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds, datetime_to_timedelta, agg_trip_runtime, apply_calc_runtime, apply_calc_movetime
+from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds, datetime_to_timedelta, agg_trip_runtime, apply_calc_runtime, apply_calc_movetime, apply_diff
 import holidays
     
 class match_apc_to_gtfs_settings():
@@ -47,44 +47,65 @@ class stop_time_stats_settings():
                                                             'n_field':'samples'}},
                            'samples':    np.sum}
                            
+class stop_list_setting():
+    def __init__(self):
+        pass
+    
+class trip_list_settings():
+    def __init__(self, source='apc'):
+        '''
+        Use stop times to calculate attributes for individual trips
+        '''
+        source = source.lower()
+        if source not in ['apc','gtfs']:
+            raise Exception('source must be "apc" or "gtfs", got %s instead' % source)
+        if source=='apc':
+            self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','DATE','TRIP']
+            self.sortby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','DATE','TRIP','SEQ']
+            #self.first_time = 'ARRIVAL_TIME'
+            #self.last_time = 'ARRIVAL_TIME' # using ARRIVAL_TIME for the endpoint to avoid including layover
+            self.agg_args = {'ARRIVAL_TIME':['first','last'],
+                             'stopped_time':['sum']}
+            
+            self.rename = {('ARRIVAL_TIME','first'):'first_arrival_time',
+                           ('ARRIVAL_TIME','last'):'last_arrival_time',
+                           ('stopped_time','sum'):'observed_stopped_time'}
+            
+            self.apply_args = {'observed_runtime':apply_calc_runtime,
+                               'observed_moving_time':apply_calc_movetime}
+        elif source=='gtfs':
+            self.groupby = ['file_idx','trip_id']
+            self.sortby = ['file_idx','trip_id','stop_sequence']
+            self.agg_args = {'arrival_time':['first'],
+                             'departure_time':['last'],
+                             'stopped_time':['sum']
+                             }
+            self.rename = {('arrival_time','first'):'first_arrival_time',
+                           ('departure_time','last'):'last_arrival_time',
+                           ('stopped_time','sum'):'scheduled_stopped_time'}
+            
+            self.apply_args = {'scheduled_runtime':[apply_diff,{'val1':'last_arrival_time','val2':'first_arrival_time'}],
+                               'scheduled_moving_time':[apply_diff,{'val1':'scheduled_runtime','val2':'scheduled_stopped_time'}]}
 class trip_stats_settings():
     def __init__(self):
         '''
         trip_stats_settings contains arguments that will be used to manipulate apc and gtfs
         data into the GTFS-STAT format.
         
-        order of operations:
-            1. for both apc and gtfs:
-                1.1 calculate any stop-level statistics (i.e. dwell time)
-                1.2 calculate trip-level statistics (i.e. run time)
-                1.3 aggregate trip-level statistics across all observations
-                1.4 if processed in chunks, reaggreagate individual chunks together
-            2. combine apc and gtfs
-            
         '''
-        self.apc_groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','DATE','TRIP']
-        self.apc_sortby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','DATE','TRIP','SEQ']
-        self.apc_first_time = 'ARRIVAL_TIME'
-        self.apc_last_time = 'ARRIVAL_TIME' # using ARRIVAL_TIME for the endpoint to avoid including layover
-        self.apc_agg_args = {'ARRIVAL_TIME':['first','last','size'],
-                             'stopped_time':['sum']}
-        
-        self.apc_rename = {('ARRIVAL_TIME','first'):'first_arrival_time',
-                           ('ARRIVAL_TIME','last'):'last_arrival_time',
-                           ('ARRIVAL_TIME','size'):'samples',
-                           ('stopped_time','sum'):'observed_stopped_time'}
-        
-        self.apc_apply_args = {'observed_runtime':apply_calc_runtime,
-                           'observed_moving_time':apply_calc_movetime}
-        
-        self.gtfs_groupby = ['trip_id']
-        self.gtfs_sortby = ['stop_sequence']
-        self.gtfs_first_time = 'arrival_time'
-        self.gtfs_last_time = 'departure_time'
-        self.gtfs_stat_args = {'arrival_time':['first'],
-                               'departure_time':['last'],
-                               }
-        
+        self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
+        self.sortby = None
+        self.agg_args = {'observed_runtime':[pd.Series.mean,pd.Series.std],
+                         'observed_stopped_time':[pd.Series.mean,pd.Series.std],
+                         'observed_moving_time':[pd.Series.mean,pd.Series.std,'size']}        
+        self.rename = {('observed_runtime','mean'):'avg_observed_runtime',
+                       ('observed_runtime','std'):'stdev_observed_runtime',
+                       ('observed_stopped_time','mean'):'avg_observed_stopped_time',
+                       ('observed_stopped_time','std'):'stdev_observed_stopped_time',
+                       ('observed_moving_time','mean'):'avg_observed_moving_time',
+                       ('observed_moving_time','std'):'stdev_observed_moving_time',
+                       ('observed_moving_time','size'):'samples',} 
+        self.apply_args = None
         
 class stats():
     def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, nodes=None, logger=None, depends=None):
@@ -99,6 +120,8 @@ class stats():
         
         # APC Aggregations
         self.sts_settings = stop_time_stats_settings()
+        self.tl_apc_settings = trip_list_settings(source='apc')
+        self.tl_gtfs_settings = trip_list_settings(source='gtfs')
         self.ts_settings = trip_stats_settings()
         
         self.route_rebrand = {'8X':'8', '16X':'7X', '17':'57', '71':'7', '108':'25', '5L':'5R', '9L':'9R',
@@ -181,6 +204,11 @@ class stats():
     def _load_gtfs_feeds(self, service_id=1):
         for i, gtfs_path in izip(range(len(self.gtfs_paths)), self.gtfs_paths):
             feed = ptg.feed(gtfs_path, view={'trips.txt':{'service_id':service_id}})
+            feed.trips.loc[:,'file_idx'] = i
+            feed.stop_times.loc[:,'file_idx'] = i
+            feed.stop_times.loc[:,'departure_time'] = feed.stop_times['departure_time'].map(lambda x: dt.timedelta(seconds=x))
+            feed.stop_times.loc[:,'arrival_time'] = feed.stop_times['arrival_time'].map(lambda x: dt.timedelta(seconds=x))
+            feed.stop_times.loc[:,'stopped_time'] = feed.stop_times['departure_time'] - feed.stop_times['arrival_time']
             self.gtfs_feeds[i] = feed
         return self.gtfs_feeds
     
@@ -458,6 +486,7 @@ class stats():
             return d - dt.datetime(d.year, d.month, d.day)
         except:
             return pd.NaT
+        
     def make_stop_time_stats(self):
         if not isinstance(self.apc_to_gtfs, pd.DataFrame):
             self.log.debug('need to map gtfs to apc first!')
@@ -498,99 +527,142 @@ class stats():
         self.stop_time_stats = stop_time_stats
         return stop_time_stats
 
-    def apc_trip_stats(self, weekday=True, holiday=False, groupby=None, sortby=None, rename=None, agg_args=None, apply_args=None):
+    def make_trip_stats(self, weekday=True, holiday=False):
         '''
-        Aggregates stop_time_stats into trip_stats
-        Requires self.stop_times_stats to exist
-        '''
-        groupby = self.ts_settings.apc_groupby if groupby==None else groupby
-        sortby = self.ts_settings.apc_sortby if sortby==None else sortby
-        rename = self.ts_settings.apc_rename if rename==None else rename
-        agg_args = self.ts_settings.apc_agg_args if agg_args==None else agg_args
-        apply_args = self.ts_settings.apc_apply_args if apply_args==None else apply_args
-        
+        Aggregates stop_time_stats into trip_stats        
+        order of operations:
+            1. for both apc and gtfs:
+                1.1 calculate any stop-level statistics (i.e. dwell time)
+                1.2 calculate trip-level statistics (i.e. run time)
+                1.3 aggregate trip-level statistics across all observations
+                1.4 if processed in chunks, reaggreagate individual chunks together
+            2. combine apc and gtfs
+            
+        '''        
         # prep apc data if it has not already been done.
         if self._apc_pickle_files==None:
             self._prep_apc_pickle_files(weekday, holiday)
             
+        apc_files = []
+        for key in self.apc_keys:
+            apc_files.append(self._apc_pickle_files[key])
+        gtfs_trip_stat_files = []
+        for idx, feed in self.gtfs_feeds.iteritems():
+            ofile = self.fg.next()
+            dump_pickle(ofile, feed.stop_times)
+            gtfs_trip_stat_files.append(ofile)
         if self.distributed:
-            self._apc_trip_stats_distributed(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
+            self._apc_trip_list = self._aggregate_and_apply(apc_files,
+                                                            groupby=self.tl_apc_settings.groupby, 
+                                                            sortby=self.tl_apc_settings.sortby, 
+                                                            rename=self.tl_apc_settings.rename, 
+                                                            agg_args=self.tl_apc_settings.agg_args, 
+                                                            apply_args=self.tl_apc_settings.apply_args)
+            self._apc_trip_stats = self._aggregate_df(data=self._apc_trip_list,
+                                                      groupby=self.ts_settings.groupby, 
+                                                      sortby=self.ts_settings.sortby, 
+                                                      rename=self.ts_settings.rename, 
+                                                      agg_args=self.ts_settings.agg_args, 
+                                                      apply_args=self.ts_settings.apply_args)
+            self._gtfs_trip_list = self._aggregate_and_apply(gtfs_trip_stat_files,
+                                                             groupby=self.tl_gtfs_settings.groupby, 
+                                                             sortby=self.tl_gtfs_settings.sortby, 
+                                                             rename=self.tl_gtfs_settings.rename, 
+                                                             agg_args=self.tl_gtfs_settings.agg_args, 
+                                                             apply_args=self.tl_gtfs_settings.apply_args)
         else:
-            self._apc_trip_stats_sequential(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
-        return self._apc_trip_stats
+            pass
+            #self._apc_trip_list_sequential(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
+            #self._apc_trip_stats_sequential(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
         
-    def _apc_trip_stats_distributed(self, weekday, holiday, groupby, sortby, rename, agg_args, apply_args):
-        from dispy_processing_utils import proc_aggregate, proc_apply
-        
-        # submit aggregate jobs
-        self.log.debug('creating iterator for aggregation jobs')
-        agg_iter = self._iter_aggregate_job(groupby, sortby, rename, agg_args)
-        self.log.debug('distributing aggregate jobs')
-        results = self._distribute(proc_aggregate, agg_iter)
-        self.log.debug(str(results))
-        self.log.debug('creating iterator for apply jobs')
-        apply_iter = self._iter_apply_job(results, apply_args)
-        self.log.debug('distributing apply jobs')
-        results = self._distribute(proc_apply, apply_iter)
-        self.log.debug(str(results))
-        dfs = []
-        for result in results:
-            df = load_pickle(result)
-            dfs.append(df)
-        apc_trip_stats = pd.concat(dfs)
-        self._apc_trip_stats = apc_trip_stats
-        return apc_trip_stats
-      
-    def gtfs_trip_stats(self, weekday=True, holiday=False, groupby=None, sortby=None, rename=None, agg_args=None, apply_args=None):
-        '''
-        Aggregates stop_time_stats into trip_stats
-        Requires self.stop_times_stats to exist
-        '''
-        groupby = self.ts_settings.gtfs_groupby if groupby==None else groupby
-        sortby = self.ts_settings.gtfs_sortby if sortby==None else sortby
-        rename = self.ts_settings.gtfs_rename if rename==None else rename
-        agg_args = self.ts_settings.gtfs_agg_args if agg_args==None else agg_args
-        apply_args = self.ts_settings.gtfs_apply_args if apply_args==None else apply_args
-        
-        # prep apc data if it has not already been done.
-        #if self._apc_pickle_files==None:
-        #    self._prep_apc_pickle_files(weekday, holiday)
-            
-        if self.distributed:
-            self._gtfs_trip_stats_distributed(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
-        else:
-            self._gtfs_trip_stats_sequential(weekday, holiday, groupby, sortby, rename, agg_args, apply_args)
-        return self._gtfs_trip_stats
-        
-    def _gtfs_trip_stats_distributed(self, weekday, holiday, groupby, sortby, rename, agg_args, apply_args):
-        from dispy_processing_utils import proc_aggregate, proc_apply
-        
-        # submit aggregate jobs
-        self.log.debug('creating iterator for aggregation jobs')
-        agg_iter = self._iter_aggregate_job(groupby, sortby, rename, agg_args)
-        self.log.debug('distributing aggregate jobs')
-        results = self._distribute(proc_aggregate, agg_iter)
-        self.log.debug(str(results))
-        self.log.debug('creating iterator for apply jobs')
-        apply_iter = self._iter_apply_job(results, apply_args)
-        self.log.debug('distributing apply jobs')
-        results = self._distribute(proc_apply, apply_iter)
-        self.log.debug(str(results))
-        dfs = []
-        for result in results:
-            df = load_pickle(result)
-            dfs.append(df)
-        apc_trip_stats = pd.concat(dfs)
-        self._apc_trip_stats = apc_trip_stats
-        return apc_trip_stats        
+        trip_stats = pd.DataFrame(self._apc_trip_stats, copy=True)
+        self.log.debug(trip_stats.columns)
+        trip_stats.loc[:,'route_id'] = np.nan
+        trip_stats.loc[:,'trip_id'] = np.nan
+        trip_stats.update(self.apc_to_gtfs)
+        trip_stats.loc[:,'scheduled_runtime'] = pd.NaT
+        trip_stats.loc[:,'scheduled_moving_time'] = pd.NaT
+        trip_stats.loc[:,'scheduled_stopped_time'] = pd.NaT
+        trip_stats = trip_stats.reset_index().set_index(['file_idx','trip_id'])
+        gtfs_trips = self._gtfs_trip_list.reset_index().set_index(['file_idx','trip_id'])
+        self.log.debug(trip_stats.head())
+        trip_stats.update(gtfs_trips, overwrite=False)
+        self.log.debug(trip_stats.head())
+        # the update casts timedeltas to datetimes for some reason, so cast them back
+        trip_stats.loc[:,'scheduled_runtime'] = trip_stats['scheduled_runtime'].map(lambda x: datetime_to_timedelta(x))
+        trip_stats.loc[:,'scheduled_moving_time'] = trip_stats['scheduled_moving_time'].map(lambda x: datetime_to_timedelta(x))
+        trip_stats.loc[:,'scheduled_stopped_time'] = trip_stats['scheduled_stopped_time'].map(lambda x: datetime_to_timedelta(x))
+        self.log.debug(trip_stats.head())
 
+        trip_stats = trip_stats.reset_index().loc[:,['file_idx','route_id','trip_id',
+                                                     'scheduled_runtime',
+                                                     'scheduled_moving_time',
+                                                     'scheduled_stopped_time',
+                                                     'avg_observed_runtime',
+                                                     'stdev_observed_runtime',
+                                                     'avg_observed_moving_time',
+                                                     'stdev_observed_moving_time',
+                                                     'avg_observed_stopped_time',
+                                                     'stdev_observed_stopped_time']]
+
+        self.trip_stats = trip_stats
+        return trip_stats
+
+    def _aggregate_df(self, data, groupby, sortby, rename, agg_args, apply_args):
+        if sortby != None:
+            data.sort_values(by=sortby, inplace=True)
+        
+        agg = data.groupby(groupby).agg(agg_args)
+        
+        if rename!=None:
+            print "proc_aggregate.renaming columns"
+            new_cols = []
+            for c in agg.columns:
+                try:
+                    nc = rename[c]
+                    new_cols.append(nc)
+                except Exception as e:
+                    print 'failed to rename column %s' % c
+                    print e
+            agg.columns = new_cols
+            
+        if apply_args!=None:
+            if not isinstance(apply_args, dict):
+                raise Exception(r'apply_args must be type (dict)')
+            for fname, apply_func in apply_args.iteritems():
+                print "proc_apply.applying.%s" % (apply_func.__name__)
+                agg[fname] = agg.apply(apply_func, axis=1)
+                
+        return agg
+    
+    def _aggregate_and_apply(self, infiles, groupby, sortby, rename, agg_args, apply_args):
+        '''
+        takes a list of pickled dataframe files, and then aggregates them using groupby, 
+        sortby, rename, and agg_args; then applies the apply_args.  Returns a single 
+        dataframe
+        '''
+        from dispy_processing_utils import proc_aggregate, proc_apply
+        
+        # submit aggregate jobs
+        self.log.debug('creating iterator for aggregation jobs')
+        agg_iter = self._iter_aggregate_job(infiles, groupby, sortby, rename, agg_args)
+        self.log.debug('distributing aggregate jobs')
+        results = self._distribute(proc_aggregate, agg_iter)
+        self.log.debug('creating iterator for apply jobs')
+        apply_iter = self._iter_apply_job(results, apply_args)
+        self.log.debug('distributing apply jobs')
+        results = self._distribute(proc_apply, apply_iter)
+        dfs = []
+        for result in results:
+            df = load_pickle(result)
+            dfs.append(df)
+        agg = pd.concat(dfs)
+        #self._apc_trip_list = apc_trip_list
+        return agg
 
     # job argument iterators
-    def _iter_aggregate_job(self, groupby, sortby, rename, agg_args):
-        for key in self.apc_keys:
-            #self.log.debug(self._apc_pickle_files)
-            #self.log.debug(self._apc_pickle_files[key])
-            ifile = self._apc_pickle_files[key]
+    def _iter_aggregate_job(self, files, groupby, sortby, rename, agg_args):
+        for ifile in files:
             ofile = self.fg.next()
             yield (ifile, ofile, groupby, sortby, rename, agg_args)
             
@@ -636,8 +708,8 @@ class stats():
         results = []
         i = 1
         for args in job_iter:
-            self.log.debug('process: %s' % process.__name__)
-            self.log.debug('args: %s' % str(args))
+#            self.log.debug('process: %s' % process.__name__)
+#            self.log.debug('args: %s' % str(args))
             job = cluster.submit(*args)
             self.log.debug("submitting %s job %d" % (process.__name__, i))
             jobs_cond.acquire()
@@ -660,13 +732,11 @@ class stats():
                     result = job.result
                     pop_ids.append(jobid)
                     results.append(result)
-                    #print_dispy_job_error(job)
+                elif job.status in [dispy.DispyJob.Abandoned, dispy.DispyJob.Cancelled,
+                                    dispy.DispyJob.Terminated]:
                     self.log.debug('- %s' % job.stderr)
                     self.log.debug('- %s' % job.stdout)
                     self.log.debug('- %s' % job.exception)
-                elif job.status in [dispy.DispyJob.Abandoned, dispy.DispyJob.Cancelled,
-                                    dispy.DispyJob.Terminated]:
-                    print_dispy_job_error(job)
             for jobid in pop_ids:
                 wait_queue.pop(jobid)
 
@@ -679,13 +749,14 @@ class stats():
                 self.log.debug("finished job %d" % jobid)
                 pop_ids.append(jobid)
                 results.append(result)
-                self.log.debug('- %s' % job.stderr)
-                self.log.debug('- %s' % job.stdout)
-                self.log.debug('- %s' % job.exception)
+
                 #print_dispy_job_error(job)
             except Exception as e:
                 self.log.warn(e)
-                print_dispy_job_error(job)
+                #print_dispy_job_error(job)
+                self.log.debug('- %s' % job.stderr)
+                self.log.debug('- %s' % job.stdout)
+                self.log.debug('- %s' % job.exception)
         for jobid in pop_ids:
             wait_queue.pop(jobid)
         cluster.close()
