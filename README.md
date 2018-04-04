@@ -3,8 +3,8 @@
 
 Tools to build GTFS-STAT files from observed data
 
-**version**: 0.1.0-alpha  
-**updated**: 01 February 2018  
+**version**: 0.1.1-alpha  
+**updated**: 03 April 2018  
 **created**: 01 February 2018  
 **authors**:
 
@@ -22,6 +22,8 @@ explicit changes please fork the [git repo][repo] and submit a pull request.
 
 ### Changelog
 
+-  `0.1.1-alpha`: add trip_stats functionality, and refactor with generic functions to handle task distribution
 -  `0.1.0-alpha`: initial commit
+
 
 
