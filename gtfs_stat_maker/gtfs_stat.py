@@ -108,14 +108,23 @@ class trip_stats_settings():
 class route_stats_settings():
     def __init__(self, source='apc'):
         self.groupby = ['route_id','service_id','timeperiod_id']
-        self.sortby = ['route_id','service_id','timeperiod_id']
+        self.sortby = ['route_id','service_id','scheduled_start_time','timeperiod_id']
         self.timeperiods = None #TODO
         self.agg_args = {'scheduled_start_time':[calc_headway],
+                         'scheduled_runtime':[pd.Series.mean,pd.Series.std],
+                         'scheduled_stopped_time':[pd.Series.mean,pd.Series.std],
+                         'scheduled_moving_time':[pd.Series.mean,pd.Series.std],
                          'observed_start_time':[calc_headway],
                          'observed_runtime':[pd.Series.mean,pd.Series.std],
                          'observed_stopped_time':[pd.Series.mean,pd.Series.std],
                          'observed_moving_time':[pd.Series.mean,pd.Series.std,'size']}        
         self.rename = {('scheduled_start_time','calc_headway'):'scheduled_avg_headway',
+                       ('scheduled_runtime','mean'):'avg_scheduled_runtime',
+                       ('scheduled_runtime','std'):'stdev_scheduled_runtime',
+                       ('scheduled_stopped_time','mean'):'avg_scheduled_stopped_time',
+                       ('scheduled_stopped_time','std'):'stdev_scheduled_stopped_time',
+                       ('scheduled_moving_time','mean'):'avg_scheduled_moving_time',
+                       ('scheduled_moving_time','std'):'stdev_scheduled_moving_time',
                        ('observed_start_time','calc_headway'):'observed_avg_headway',
                        ('observed_runtime','mean'):'avg_observed_runtime',
                        ('observed_runtime','std'):'stdev_observed_runtime',
@@ -625,12 +634,14 @@ class stats():
         trip_list = pd.DataFrame(self._trip_list, copy=True)
         trip_list.rename(columns={'file_idx':'service_id'}, inplace=True) # this should be unnecessary.
         trip_list['timeperiod_id'] = apply_time_periods(trip_list['scheduled_start_time'], self.timeperiods)
+        self.log.debug(trip_list.head())
         self._route_stats = self._aggregate_df(data=trip_list,
                                                groupby=self.rs_settings.groupby, 
                                                sortby=self.rs_settings.sortby, 
                                                rename=self.rs_settings.rename, 
                                                agg_args=self.rs_settings.agg_args, 
                                                apply_args=self.rs_settings.apply_args)
+        return self._route_stats
         
     def _aggregate_df(self, data, groupby, sortby, rename, agg_args, apply_args):
         if sortby != None:
