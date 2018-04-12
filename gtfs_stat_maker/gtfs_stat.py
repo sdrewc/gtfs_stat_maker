@@ -125,35 +125,7 @@ class route_stats_settings():
                        ('observed_moving_time','std'):'stdev_observed_moving_time',
                        ('observed_moving_time','size'):'samples',} 
         self.apply_args = None
-#        if source=='apc':
-#            self.groupby = ['service_id','ROUTE_SHORT_NAME','DIR','PATTCODE','timeperiod_id']
-#            self.sortby = None
-#            self.agg_args = {'headway':calc_headway,
-#                             'observed_runtime':[pd.Series.mean,pd.Series.std],
-#                             'observed_stopped_time':[pd.Series.mean,pd.Series.std],
-#                             'observed_moving_time':[pd.Series.mean,pd.Series.std,'size']}        
-#            self.rename = {('observed_runtime','mean'):'avg_observed_runtime',
-#                           ('observed_runtime','std'):'stdev_observed_runtime',
-#                           ('observed_stopped_time','mean'):'avg_observed_stopped_time',
-#                           ('observed_stopped_time','std'):'stdev_observed_stopped_time',
-#                           ('observed_moving_time','mean'):'avg_observed_moving_time',
-#                           ('observed_moving_time','std'):'stdev_observed_moving_time',
-#                           ('observed_moving_time','size'):'samples',} 
-#            self.apply_args = None
-#        elif source=='gtfs':
-#            self.groupby = ['file_idx','route_id','direction_id']
-#            self.sortby = None
-#            self.agg_args = {'observed_runtime':[pd.Series.mean,pd.Series.std],
-#                             'observed_stopped_time':[pd.Series.mean,pd.Series.std],
-#                             'observed_moving_time':[pd.Series.mean,pd.Series.std,'size']}        
-#            self.rename = {('observed_runtime','mean'):'avg_observed_runtime',
-#                           ('observed_runtime','std'):'stdev_observed_runtime',
-#                           ('observed_stopped_time','mean'):'avg_observed_stopped_time',
-#                           ('observed_stopped_time','std'):'stdev_observed_stopped_time',
-#                           ('observed_moving_time','mean'):'avg_observed_moving_time',
-#                           ('observed_moving_time','std'):'stdev_observed_moving_time',
-#                           ('observed_moving_time','size'):'samples',} 
-#            self.apply_args = None
+
 class stats():
     def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, nodes=None, logger=None, depends=None, tempdir=None, timeperiods=None):
         self.apc_path = apc_hdf
@@ -541,7 +513,18 @@ class stats():
                                                              agg_args=self.tl_gtfs_settings.agg_args, 
                                                              apply_args=self.tl_gtfs_settings.apply_args)
         else:
-            pass
+            self._apc_trip_list = self._aggregate_df(apc_files,
+                                                     groupby=self.tl_apc_settings.groupby, 
+                                                     sortby=self.tl_apc_settings.sortby, 
+                                                     rename=self.tl_apc_settings.rename, 
+                                                     agg_args=self.tl_apc_settings.agg_args, 
+                                                     apply_args=self.tl_apc_settings.apply_args)
+            self._gtfs_trip_list = self._aggregate_df(gtfs_trip_stat_files,
+                                                      groupby=self.tl_gtfs_settings.groupby, 
+                                                      sortby=self.tl_gtfs_settings.sortby, 
+                                                      rename=self.tl_gtfs_settings.rename, 
+                                                      agg_args=self.tl_gtfs_settings.agg_args, 
+                                                      apply_args=self.tl_gtfs_settings.apply_args)
            
         trip_list = pd.DataFrame(self._apc_trip_list, copy=True)
         trip_list.loc[:,'route_id'] = np.nan
@@ -557,7 +540,7 @@ class stats():
         trip_list.update(gtfs_trips, overwrite=False)
         
         # the update casts timedeltas to datetimes for some reason, so cast them back
-        trip_list.loc[:,'scheduled_start_time'] = gtfs_trips['scheduled_start_time'].map(lambda x: datetime_to_timedelta(x))
+        trip_list.loc[:,'scheduled_start_time'] = trip_list['scheduled_start_time'].map(lambda x: datetime_to_timedelta(x))
         trip_list.loc[:,'scheduled_runtime'] = trip_list['scheduled_runtime'].map(lambda x: datetime_to_timedelta(x))
         trip_list.loc[:,'scheduled_moving_time'] = trip_list['scheduled_moving_time'].map(lambda x: datetime_to_timedelta(x))
         trip_list.loc[:,'scheduled_stopped_time'] = trip_list['scheduled_stopped_time'].map(lambda x: datetime_to_timedelta(x))
