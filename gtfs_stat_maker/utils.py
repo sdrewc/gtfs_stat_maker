@@ -43,12 +43,6 @@ def calc_headway(series, periods=-1):
 
 def apply_diff(x, val1, val2):
     return x[val1] - x[val2]
-
-#def apply_calc_runtime(x):
-#    return x['last_arrival_time'] - x['first_arrival_time']
-#
-#def apply_calc_movetime(x): 
-#    return x['observed_runtime'] - x['observed_stopped_time']
         
 def normalize_timedelta(series, zero_hour=0):
     '''
@@ -66,8 +60,6 @@ def normalize_timedelta(series, zero_hour=0):
     else:
         return series
 
-#def tpmap(df, timefield='ARRIVAL_TIME', tpfield='time_period', tpnames=['ea','am','md','pm','ev'], tpranges=[[dt.time(3),dt.time(6)],[dt.time(6),dt.time(9)],[dt.time(9),dt.time(15,30)],[dt.time(15,30),dt.time(18,30)],[dt.time(18,30),]):
-#    df.loc[df[timefield].]
 def str_to_timedelta(hhmmss):
     split = hhmmss.split(':')
     return dt.timedelta(hours=int(split[0]) % 24, minutes=int(split[1]), seconds=int(split[2]))

@@ -295,6 +295,31 @@ class stats():
             self.gtfs_feeds[i] = feed
         return self.gtfs_feeds
         
+    def _prep_apc_pickle_files(self, weekday, holiday):
+        apc_pickle_files = {}
+        us_holidays = holidays.UnitedStates()
+        for key in self.apc_keys:
+            self.log.debug('reading file %s, key %s' % (self.apc_path, key))
+            apc = pd.read_hdf(self.apc_path, key)
+            
+            # assign each record to the gtfs feed with corresponding date range
+            self.log.debug('updating file_idx')
+            for idx, row in self.calendar.iterrows():
+                apc.loc[apc['DATE'].between(row['start_date'],row['end_date']),'file_idx'] = idx
+                
+            # create new attributes
+            apc.loc[:,'stopped_time'] = apc['DEPARTURE_TIME'] - apc['ARRIVAL_TIME']
+            apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
+            if weekday: 
+                apc = apc.loc[apc['weekday'].isin([0,1,2,3,4])]
+            if not holiday:
+                apc = apc.loc[~apc['DATE'].map(lambda x: x in us_holidays)]
+            ifile = self.fg.next()
+            dump_pickle(ifile, apc)
+            apc_pickle_files[key] = ifile
+        self._apc_pickle_files = apc_pickle_files
+        return apc_pickle_files
+    
     def reagg_apc_stop_time_stats(self, groupby=None, **kwargs):
         '''
         Assumes that apc data has already been read, and apc_stop_time_stats created.
@@ -409,12 +434,6 @@ class stats():
         self.apc_to_gtfs = first_stops.loc[:,['route_id','trip_id']]
         return first_stops
     
-    def datetime_to_timedelta(d):
-        try:
-            return d - dt.datetime(d.year, d.month, d.day)
-        except:
-            return pd.NaT
-    
     def make_stop_time_stats(self, weekday=True, holiday=False):
         '''
         Aggregates stop_time_stats into trip_stats        
@@ -492,46 +511,6 @@ class stats():
                                                                'stdev_departure_time',
                                                                'samples']]
 
-        self.stop_time_stats = stop_time_stats
-        return stop_time_stats
-    
-    def make_stop_time_stats_old(self):
-        if not isinstance(self.apc_to_gtfs, pd.DataFrame):
-            self.log.debug('need to map gtfs to apc first!')
-            return
-        if not isinstance(self._apc_stop_time_stats, pd.DataFrame):
-            self.log.debug('need to create apc_stop_time_stats first!')
-            return
-        stop_time_stats = self._apc_stop_time_stats.set_index(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP'])
-        stop_time_stats.loc[:,'route_id'] = np.nan
-        stop_time_stats.loc[:,'trip_id'] = np.nan
-        stop_time_stats.update(self.apc_to_gtfs)
-        stop_time_stats.rename(columns={'STOP_AVL':'stop_id',
-                                        'SEQ':'stop_sequence'}, inplace=True)
-        stop_time_stats.loc[:,'scheduled_arrival_time'] = pd.NaT
-        stop_time_stats.loc[:,'scheduled_departure_time'] = pd.NaT
-        stop_time_stats.loc[:,'stop_id'] = stop_time_stats['stop_id'].astype('str')
-        stop_time_stats = stop_time_stats.reset_index().set_index(['file_idx','trip_id','stop_sequence','stop_id'])
-
-        for idx, feed in self.gtfs_feeds.iteritems():
-            stop_times = pd.DataFrame(feed.stop_times, copy=True)
-            stop_times.loc[:,'file_idx'] = idx
-            stop_times.set_index(['file_idx','trip_id','stop_sequence','stop_id'], inplace=True)
-            stop_time_stats.update(stop_times)
-            
-        stop_time_stats.loc[:,'scheduled_arrival_time'] = stop_time_stats['scheduled_arrival_time'].map(lambda x: datetime_to_timedelta(x))
-        stop_time_stats.loc[:,'scheduled_departure_time'] = stop_time_stats['scheduled_departure_time'].map(lambda x: datetime_to_timedelta(x))
-        stop_time_stats = stop_time_stats.reset_index().loc[:,['service_id',
-                                                               'trip_id',
-                                                               'stop_sequence',
-                                                               'stop_id',
-                                                               'scheduled_arrival_time',
-                                                               'scheduled_departure_time',
-                                                               'avg_arrival_time',
-                                                               'stdev_arrival_time',
-                                                               'avg_departure_time',
-                                                               'stdev_departure_time',
-                                                               'samples']]
         self.stop_time_stats = stop_time_stats
         return stop_time_stats
         
@@ -697,6 +676,7 @@ class stats():
                 
         return agg
     
+    # DISTRIBUTION FUNCTIONS
     def _aggregate(self, infiles, groupby, sortby, rename, agg_args):
         pass
     
@@ -750,31 +730,7 @@ class stats():
             ofile = self.fg.next()
             yield (ifile, ofile, apply_args, axis)
 
-    def _prep_apc_pickle_files(self, weekday, holiday):
-        apc_pickle_files = {}
-        us_holidays = holidays.UnitedStates()
-        for key in self.apc_keys:
-            self.log.debug('reading file %s, key %s' % (self.apc_path, key))
-            apc = pd.read_hdf(self.apc_path, key)
-            
-            # assign each record to the gtfs feed with corresponding date range
-            self.log.debug('updating file_idx')
-            for idx, row in self.calendar.iterrows():
-                apc.loc[apc['DATE'].between(row['start_date'],row['end_date']),'file_idx'] = idx
-                
-            # create new attributes
-            apc.loc[:,'stopped_time'] = apc['DEPARTURE_TIME'] - apc['ARRIVAL_TIME']
-            apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
-            if weekday: 
-                apc = apc.loc[apc['weekday'].isin([0,1,2,3,4])]
-            if not holiday:
-                apc = apc.loc[~apc['DATE'].map(lambda x: x in us_holidays)]
-            ifile = self.fg.next()
-            dump_pickle(ifile, apc)
-            apc_pickle_files[key] = ifile
-        self._apc_pickle_files = apc_pickle_files
-        return apc_pickle_files
-    
+    # distributor
     def _distribute(self, process, job_iter, depends=[]):
         # set up cluster
         cluster = dispy.JobCluster(process, 
