@@ -72,8 +72,8 @@ class trip_list_settings():
             self.apply_args = {'observed_runtime':[apply_diff,{'val1':'observed_end_time','val2':'observed_start_time'}],
                                'observed_moving_time':[apply_diff,{'val1':'observed_runtime','val2':'observed_stopped_time'}]}
         elif source=='gtfs':
-            self.groupby = ['file_idx','trip_id']
-            self.sortby = ['file_idx','trip_id','stop_sequence']
+            self.groupby = ['file_idx','trip_id','direction_id']
+            self.sortby = ['file_idx','trip_id','direction_id','stop_sequence']
             self.agg_args = {'arrival_time':['first'],
                              'departure_time':['last'],
                              'stopped_time':['sum']
@@ -107,8 +107,8 @@ class trip_stats_settings():
         
 class route_stats_settings():
     def __init__(self, source='apc'):
-        self.groupby = ['route_id','service_id','timeperiod_id']
-        self.sortby = ['route_id','service_id','scheduled_start_time','timeperiod_id']
+        self.groupby = ['route_id','service_id','direction_id','timeperiod_id']
+        self.sortby = ['route_id','service_id','direction_id','scheduled_start_time','timeperiod_id']
         self.timeperiods = None #TODO
         self.agg_args = {'scheduled_start_time':[calc_headway],
                          'scheduled_runtime':[pd.Series.mean,pd.Series.std],
@@ -273,6 +273,14 @@ class stats():
             feed.stop_times.loc[:,'departure_time'] = feed.stop_times['departure_time'].map(lambda x: dt.timedelta(seconds=x))
             feed.stop_times.loc[:,'arrival_time'] = feed.stop_times['arrival_time'].map(lambda x: dt.timedelta(seconds=x))
             feed.stop_times.loc[:,'stopped_time'] = feed.stop_times['departure_time'] - feed.stop_times['arrival_time']
+            
+            feed.trips.set_index(['trip_id'], inplace=True)
+            feed.stop_times.set_index(['trip_id'], inplace=True)
+            feed.stop_times.loc[:,'direction_id'] = np.nan
+            feed.stop_times.update(feed.trips.loc[:,['direction_id']], overwrite=False)
+            feed.trips.reset_index(inplace=True)
+            feed.stop_times.reset_index(inplace=True)
+            
             self.gtfs_feeds[i] = feed
         return self.gtfs_feeds
         
@@ -365,7 +373,7 @@ class stats():
     def match_apc_to_gtfs(self):
         group_columns = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
         agg_columns = ['SEQ','STOP_AVL','avg_arrival_time','stdev_arrival_time']
-        first_stops = self._apc_stop_time_stats.groupby(group_columns)[agg_columns].first()
+        first_stops = self._apc_stop_time_stats.reset_index().groupby(group_columns)[agg_columns].first()
         first_stops.loc[:,'match_flag'] = 0
         file_idx, route_short_name, dir_ = None, None, None
         unfound_routes = set()
@@ -404,6 +412,7 @@ class stats():
                     matches.loc[:,'diff'] = (matches['scheduled_arrival_time'] - first_stop['avg_arrival_time']).map(lambda x: abs(x))
                     first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
                     first_stops.loc[idx,'trip_id'] = matches.loc[matches['diff'].idxmin(),'trip_id']
+                    first_stops.loc[idx,'direction_id'] = dir_
                     first_stops.loc[idx,'match_flag'] = 1
                     break
                 elif len(matches) == 0:
@@ -411,8 +420,9 @@ class stats():
                 else:
                     first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
                     first_stops.loc[idx,'trip_id'] = matches.iloc[0]['trip_id']
+                    first_stops.loc[idx,'direction_id'] = dir_
                     break
-        self.apc_to_gtfs = first_stops.loc[:,['route_id','trip_id']]
+        self.apc_to_gtfs = first_stops.loc[:,['route_id','trip_id','direction_id']]
         return first_stops
     
     def make_stop_time_stats(self, weekday=True, holiday=False):
@@ -536,33 +546,46 @@ class stats():
                                                       apply_args=self.tl_gtfs_settings.apply_args)
            
         trip_list = pd.DataFrame(self._apc_trip_list, copy=True)
+        #self.log.debug(trip_list.head())
         trip_list.loc[:,'route_id'] = np.nan
         trip_list.loc[:,'trip_id'] = np.nan
+        trip_list.loc[:,'direction_id'] = np.nan
+        #self.log.debug(trip_list.head())
         trip_list = trip_list.reset_index().set_index(self.apc_to_gtfs.index.names)
+        #self.log.debug(trip_list.head())
         trip_list.update(self.apc_to_gtfs)
+        #self.log.debug(trip_list.head())
         trip_list.loc[:,'scheduled_start_time'] = pd.NaT
         trip_list.loc[:,'scheduled_runtime'] = pd.NaT
         trip_list.loc[:,'scheduled_moving_time'] = pd.NaT
         trip_list.loc[:,'scheduled_stopped_time'] = pd.NaT
-        trip_list = trip_list.reset_index().set_index(['file_idx','trip_id'])
-        gtfs_trips = self._gtfs_trip_list.reset_index().set_index(['file_idx','trip_id'])
+        trip_list = trip_list.reset_index().set_index(['file_idx','trip_id','direction_id'])
+        
+        gtfs_trips = self._gtfs_trip_list.reset_index().set_index(['file_idx','trip_id','direction_id'])
+        #gtfs_trips.to_hdf(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018Mar16.145539\temp_gtfs_list.h5','data')
         trip_list.update(gtfs_trips, overwrite=False)
         
+        #trip_list.to_hdf(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018Mar16.145539\temp_trip_list.h5','data')
         # the update casts timedeltas to datetimes for some reason, so cast them back
+        trip_list.reset_index(inplace=True)
         trip_list.loc[:,'scheduled_start_time'] = trip_list['scheduled_start_time'].map(lambda x: datetime_to_timedelta(x))
         trip_list.loc[:,'scheduled_runtime'] = trip_list['scheduled_runtime'].map(lambda x: datetime_to_timedelta(x))
         trip_list.loc[:,'scheduled_moving_time'] = trip_list['scheduled_moving_time'].map(lambda x: datetime_to_timedelta(x))
         trip_list.loc[:,'scheduled_stopped_time'] = trip_list['scheduled_stopped_time'].map(lambda x: datetime_to_timedelta(x))
-        trip_list = trip_list.reset_index().loc[:,['file_idx','route_id','trip_id',
-                                                   'scheduled_start_time',
-                                                   'scheduled_runtime',
-                                                   'scheduled_moving_time',
-                                                   'scheduled_stopped_time',
-                                                   'observed_start_time',
-                                                   'observed_runtime',
-                                                   'observed_moving_time',
-                                                   'observed_stopped_time',
-                                                   ]]
+        
+        # also cast this one to timedelta
+        trip_list.loc[:,'observed_start_time'] = trip_list['scheduled_start_time'].map(lambda x: datetime_to_timedelta(x))
+        
+        trip_list = trip_list.loc[:,['file_idx','route_id','trip_id','direction_id',
+                                     'scheduled_start_time',
+                                     'scheduled_runtime',
+                                     'scheduled_moving_time',
+                                     'scheduled_stopped_time',
+                                     'observed_start_time',
+                                     'observed_runtime',
+                                     'observed_moving_time',
+                                     'observed_stopped_time',
+                                     ]]
         
         trip_list.rename(columns={'file_idx':'service_id'}, inplace=True)
         self._trip_list = trip_list
@@ -592,35 +615,37 @@ class stats():
         self.log.debug(trip_stats.columns)
         trip_stats.loc[:,'route_id'] = np.nan
         trip_stats.loc[:,'trip_id'] = np.nan
+        trip_stats.loc[:,'direction_id'] = np.nan
         trip_stats.update(self.apc_to_gtfs)
         trip_stats.loc[:,'scheduled_start_time'] = pd.NaT
         trip_stats.loc[:,'scheduled_runtime'] = pd.NaT
         trip_stats.loc[:,'scheduled_moving_time'] = pd.NaT
         trip_stats.loc[:,'scheduled_stopped_time'] = pd.NaT
-        trip_stats = trip_stats.reset_index().set_index(['file_idx','trip_id'])
-        gtfs_trips = self._gtfs_trip_list.reset_index().set_index(['file_idx','trip_id'])
+        trip_stats = trip_stats.reset_index().set_index(['file_idx','trip_id','direction_id'])
+        gtfs_trips = self._gtfs_trip_list.reset_index().set_index(['file_idx','trip_id','direction_id'])
         self.log.debug(trip_stats.head())
         self.log.debug(gtfs_trips.head())
         trip_stats.update(gtfs_trips, overwrite=False)
         self.log.debug(trip_stats.head())
         # the update casts timedeltas to datetimes for some reason, so cast them back
+        trip_stats.reset_index(inplace=True)
         trip_stats.loc[:,'scheduled_start_time'] = trip_stats['scheduled_start_time'].map(lambda x: datetime_to_timedelta(x))
         trip_stats.loc[:,'scheduled_runtime'] = trip_stats['scheduled_runtime'].map(lambda x: datetime_to_timedelta(x))
         trip_stats.loc[:,'scheduled_moving_time'] = trip_stats['scheduled_moving_time'].map(lambda x: datetime_to_timedelta(x))
         trip_stats.loc[:,'scheduled_stopped_time'] = trip_stats['scheduled_stopped_time'].map(lambda x: datetime_to_timedelta(x))
         self.log.debug(trip_stats.head())
 
-        trip_stats = trip_stats.reset_index().loc[:,['file_idx','route_id','trip_id',
-                                                     'scheduled_start_time',
-                                                     'scheduled_runtime',
-                                                     'scheduled_moving_time',
-                                                     'scheduled_stopped_time',
-                                                     'avg_observed_runtime',
-                                                     'stdev_observed_runtime',
-                                                     'avg_observed_moving_time',
-                                                     'stdev_observed_moving_time',
-                                                     'avg_observed_stopped_time',
-                                                     'stdev_observed_stopped_time']]
+        trip_stats = trip_stats.loc[:,['file_idx','route_id','trip_id','direction_id',
+                                       'scheduled_start_time',
+                                       'scheduled_runtime',
+                                       'scheduled_moving_time',
+                                       'scheduled_stopped_time',
+                                       'avg_observed_runtime',
+                                       'stdev_observed_runtime',
+                                       'avg_observed_moving_time',
+                                       'stdev_observed_moving_time',
+                                       'avg_observed_stopped_time',
+                                       'stdev_observed_stopped_time']]
         trip_stats.rename(columns={'file_idx':'service_id'}, inplace=True)
         self.trip_stats = trip_stats
         return trip_stats
@@ -759,6 +784,9 @@ class stats():
                     result = job.result
                     pop_ids.append(jobid)
                     results.append(result)
+                    self.log.debug('- %s' % job.stderr)
+                    self.log.debug('- %s' % job.stdout)
+                    self.log.debug('- %s' % job.exception)
                     self.log.debug('jobid %d: %s' % (jobid, result))
                 elif job.status in [dispy.DispyJob.Abandoned, dispy.DispyJob.Cancelled,
                                     dispy.DispyJob.Terminated]:
@@ -777,6 +805,9 @@ class stats():
                 self.log.debug("finished job %d" % jobid)
                 pop_ids.append(jobid)
                 results.append(result)
+                self.log.debug('- %s' % job.stderr)
+                self.log.debug('- %s' % job.stdout)
+                self.log.debug('- %s' % job.exception)
                 self.log.debug('jobid %d: %s' % (jobid, result))
             except Exception as e:
                 self.log.warn(e)
