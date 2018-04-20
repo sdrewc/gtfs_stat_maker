@@ -13,6 +13,8 @@ import holidays
 class match_apc_to_gtfs_settings():
     pass
 
+class ridership_settings():
+    
 class stop_time_stats_settings():
     def __init__(self):
         # Set of unique identifiers for a route-stop in the APC data
@@ -106,10 +108,10 @@ class trip_stats_settings():
         self.apply_args = None
         
 class route_stats_settings():
-    def __init__(self, source='apc'):
+    def __init__(self, source='apc', timeperiods=None):
         self.groupby = ['route_id','service_id','direction_id','timeperiod_id']
         self.sortby = ['route_id','service_id','direction_id','scheduled_start_time','timeperiod_id']
-        self.timeperiods = None #TODO
+        self.timeperiods = timeperiods #TODO
         self.agg_args = {'scheduled_start_time':[calc_headway],
                          'scheduled_runtime':[pd.Series.mean,pd.Series.std],
                          'scheduled_stopped_time':[pd.Series.mean,pd.Series.std],
@@ -574,7 +576,7 @@ class stats():
         trip_list.loc[:,'scheduled_stopped_time'] = trip_list['scheduled_stopped_time'].map(lambda x: datetime_to_timedelta(x))
         
         # also cast this one to timedelta
-        trip_list.loc[:,'observed_start_time'] = trip_list['scheduled_start_time'].map(lambda x: datetime_to_timedelta(x))
+        trip_list.loc[:,'observed_start_time'] = trip_list['observed_start_time'].map(lambda x: datetime_to_timedelta(x))
         
         trip_list = trip_list.loc[:,['file_idx','route_id','trip_id','direction_id',
                                      'scheduled_start_time',
@@ -659,7 +661,6 @@ class stats():
         trip_list = pd.DataFrame(self._trip_list, copy=True)
         trip_list.rename(columns={'file_idx':'service_id'}, inplace=True) # this should be unnecessary.
         trip_list['timeperiod_id'] = apply_time_periods(trip_list['scheduled_start_time'], self.timeperiods)
-        self.log.debug(trip_list.head())
         self._route_stats = self._aggregate_df(data=trip_list,
                                                groupby=self.rs_settings.groupby, 
                                                sortby=self.rs_settings.sortby, 
