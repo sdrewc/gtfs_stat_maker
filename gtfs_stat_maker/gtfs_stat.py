@@ -14,7 +14,37 @@ class match_apc_to_gtfs_settings():
     pass
 
 class ridership_settings():
-    
+    pass
+
+class group_stats_settings():
+    def __init__(self):
+        self.groupby = ['route_id','service_id','direction_id','timeperiod_id']
+        self.sortby = ['route_id','service_id','direction_id','scheduled_start_time','timeperiod_id']
+        self.agg_args = {'scheduled_start_time':[calc_headway],
+                         'scheduled_runtime':[pd.Series.mean,pd.Series.std],
+                         'scheduled_stopped_time':[pd.Series.mean,pd.Series.std],
+                         'scheduled_moving_time':[pd.Series.mean,pd.Series.std],
+                         'observed_start_time':[calc_headway],
+                         'observed_runtime':[pd.Series.mean,pd.Series.std],
+                         'observed_stopped_time':[pd.Series.mean,pd.Series.std],
+                         'observed_moving_time':[pd.Series.mean,pd.Series.std,'size']}        
+        self.rename = {('scheduled_start_time','calc_headway'):'scheduled_avg_headway',
+                       ('scheduled_runtime','mean'):'avg_scheduled_runtime',
+                       ('scheduled_runtime','std'):'stdev_scheduled_runtime',
+                       ('scheduled_stopped_time','mean'):'avg_scheduled_stopped_time',
+                       ('scheduled_stopped_time','std'):'stdev_scheduled_stopped_time',
+                       ('scheduled_moving_time','mean'):'avg_scheduled_moving_time',
+                       ('scheduled_moving_time','std'):'stdev_scheduled_moving_time',
+                       ('observed_start_time','calc_headway'):'observed_avg_headway',
+                       ('observed_runtime','mean'):'avg_observed_runtime',
+                       ('observed_runtime','std'):'stdev_observed_runtime',
+                       ('observed_stopped_time','mean'):'avg_observed_stopped_time',
+                       ('observed_stopped_time','std'):'stdev_observed_stopped_time',
+                       ('observed_moving_time','mean'):'avg_observed_moving_time',
+                       ('observed_moving_time','std'):'stdev_observed_moving_time',
+                       ('observed_moving_time','size'):'samples',} 
+        self.apply_args = None
+
 class stop_time_stats_settings():
     def __init__(self):
         # Set of unique identifiers for a route-stop in the APC data
@@ -48,10 +78,6 @@ class stop_time_stats_settings():
                                                             'std_field':'stdev_departure_time',
                                                             'n_field':'samples'}},
                            'samples':    np.sum}
-                           
-class stop_list_setting():
-    def __init__(self):
-        pass
     
 class trip_list_settings():
     def __init__(self, source='apc'):
@@ -138,7 +164,7 @@ class route_stats_settings():
         self.apply_args = None
 
 class stats():
-    def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, nodes=None, logger=None, depends=None, tempdir=None, timeperiods=None):
+    def __init__(self, apc_hdf, gtfs_paths, distributed=False, config_file=None, nodes=None, logger=None, depends=None, tempdir=None, timeperiods=None, groups=None):
         self.apc_path = apc_hdf
         self.apc_keys = get_keys(self.apc_path)
         self.calendar = None
@@ -154,6 +180,11 @@ class stats():
         self.config_file = config_file
         self.log = logger
         self.tempdir = r'C:\Temp' if tempdir == None else tempdir
+        
+        if isinstance(groups, pd.DataFrame):
+            self.groups = groups
+        elif isinstance(groups, 'str'):
+            self.groups = pd.read_csv(groups)
         
         # APC Aggregations
         self.sts_settings = stop_time_stats_settings()
@@ -171,6 +202,7 @@ class stats():
         self._apc_trip_list = None
         self._gtfs_trip_list = None
         self._trip_list = None
+        self._group_trip_list = None
         
         # GTFS-STAT
         self.gtfs_to_apc = None 
@@ -379,9 +411,9 @@ class stats():
         first_stops.loc[:,'match_flag'] = 0
         file_idx, route_short_name, dir_ = None, None, None
         unfound_routes = set()
-        for idx, feed in self.gtfs_feeds.iteritems():
-            feed.stop_times.loc[:,'scheduled_arrival_time'] = feed.stop_times['arrival_time'].map(lambda x: dt.timedelta(seconds=x))
-            feed.stop_times.loc[:,'scheduled_departure_time'] = feed.stop_times['departure_time'].map(lambda x: dt.timedelta(seconds=x))
+        #for idx, feed in self.gtfs_feeds.iteritems():
+        #    feed.stop_times.loc[:,'scheduled_arrival_time'] = feed.stop_times['arrival_time'].map(lambda x: dt.timedelta(seconds=x))
+        #    feed.stop_times.loc[:,'scheduled_departure_time'] = feed.stop_times['departure_time'].map(lambda x: dt.timedelta(seconds=x))
         for idx, first_stop in first_stops.iterrows():
             if idx[0] != file_idx:
                 file_idx = idx[0]
@@ -577,8 +609,9 @@ class stats():
         
         # also cast this one to timedelta
         trip_list.loc[:,'observed_start_time'] = trip_list['observed_start_time'].map(lambda x: datetime_to_timedelta(x))
+        trip_list.loc[:,'timeperiod_id'] = apply_time_periods(trip_list['scheduled_start_time'], self.timeperiods)
         
-        trip_list = trip_list.loc[:,['file_idx','route_id','trip_id','direction_id',
+        trip_list = trip_list.loc[:,['file_idx','route_id','trip_id','direction_id','timeperiod_id',
                                      'scheduled_start_time',
                                      'scheduled_runtime',
                                      'scheduled_moving_time',
@@ -593,6 +626,54 @@ class stats():
         self._trip_list = trip_list
         return trip_list
     
+    def make_group_trip_list(self, weekday=True, holiday=False):
+        if not isinstance(self._trip_list, pd.DataFrame):
+            self.make_trip_list()
+            
+        if not isinstance(self.groups, pd.DataFrame):
+            raise Exception("make_group_stats requires groups.txt")
+            
+        trip_list = pd.DataFrame(self._trip_list, copy=True)
+        trip_list.rename(columns={'file_idx':'service_id'}, inplace=True) # this should be unnecessary.
+        
+        has_thru = 'thru_node_set' in self.groups.columns
+        n = []
+        for idx, row in self.groups.iterrows():
+            from_node_set = row['from_node_set'] if isinstance(row['from_node_set'], list) else [row['from_node_set']]
+            to_node_set = row['to_node_set'] if isinstance(row['to_node_set'], list) else [row['to_node_set']]
+            if has_thru:
+                thru_node_set = row['thru_node_set'] if isinstance(row['thru_node_set'], list) else [row['thru_node_set']]
+            
+            for service_id, feed in self.gtfs_feeds.iteritems():
+                nodes = feed.stop_times.loc[feed.stop_times['stop_id'].isin(from_node_set),['trip_id','stop_sequence','stop_id']]
+                nodes.rename(columns={'stop_sequence':'from_node_seq'}, inplace=True)
+                nodes.set_index('trip_id', inplace=True)
+                nodes.loc[:,'to_node_seq'] = feed.stop_times.loc[feed.stop_times['stop_id'].isin(to_node_set),].set_index('trip_id')['stop_sequence']
+                nodes.loc[:,'service_id'] = service_id
+                nodes.loc[:,'group_id'] = row['group_id']
+                
+                if has_thru:
+                    nodes.loc[:,'thru_node_seq'] = feed.stop_times.loc[feed.stop_times['stop_id'].isin(thru_node_set),].set_index('trip_id')['stop_sequence']
+                    nodes.dropna(subset=['from_node_seq','to_node_seq','thru_node_seq'])
+                    nodes = nodes.loc[nodes['from_node_seq'].lt(nodes['thru_node_seq']) & nodes['thru_node_seq'].lt(nodes['to_node_seq'])]
+                else:
+                    nodes.dropna(subset=['from_node_seq','to_node_seq'])    
+                    nodes = nodes.loc[nodes['from_node_seq'].lt(nodes['to_node_seq'])]
+                
+                nodes = nodes.reset_index().set_index(['service_id','trip_id'])
+                n.append(nodes)
+                
+        group_trips = pd.concat(n)
+        trip_list.set_index(['service_id','trip_id'], inplace=True)
+        for col in trip_list.columns:
+            if col not in group_trips.columns:
+                group_trips.loc[:,col] = np.nan
+        group_trips.update(trip_list)   
+        group_trips.reset_index(inplace=True)
+        
+        self._group_trip_list = group_trips
+        return group_trips
+            
     def make_trip_stats(self, weekday=True, holiday=False):
         '''
         Aggregates stop_time_stats into trip_stats
@@ -606,6 +687,7 @@ class stats():
         '''        
         if not isinstance(self._trip_list, pd.DataFrame):
             self.make_trip_list()
+            
         self._apc_trip_stats = self._aggregate_df(data=self._apc_trip_list,
                                                   groupby=self.ts_settings.groupby, 
                                                   sortby=self.ts_settings.sortby, 
@@ -658,10 +740,28 @@ class stats():
         '''
         if not isinstance(self._trip_list, pd.DataFrame):
             self.make_trip_list()
+        
         trip_list = pd.DataFrame(self._trip_list, copy=True)
         trip_list.rename(columns={'file_idx':'service_id'}, inplace=True) # this should be unnecessary.
-        trip_list['timeperiod_id'] = apply_time_periods(trip_list['scheduled_start_time'], self.timeperiods)
+        
         self._route_stats = self._aggregate_df(data=trip_list,
+                                               groupby=self.rs_settings.groupby, 
+                                               sortby=self.rs_settings.sortby, 
+                                               rename=self.rs_settings.rename, 
+                                               agg_args=self.rs_settings.agg_args, 
+                                               apply_args=self.rs_settings.apply_args)
+        return self._route_stats
+
+    def make_group_stats(self, weekday=True, holiday=False):
+        '''
+        Make route_stats dataframe
+        '''
+        if not isinstance(self._group_trip_list, pd.DataFrame):
+            self.make_group_trip_list()
+
+        group_trips = pd.DataFrame(self._group_trip_list, copy=True)
+        
+        self._group_stats = self._aggregate_df(data=group_trips,
                                                groupby=self.rs_settings.groupby, 
                                                sortby=self.rs_settings.sortby, 
                                                rename=self.rs_settings.rename, 
