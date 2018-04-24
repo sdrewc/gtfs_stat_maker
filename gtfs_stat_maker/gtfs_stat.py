@@ -132,8 +132,8 @@ class trip_stats_settings():
         
 class route_stats_settings():
     def __init__(self, source='apc', timeperiods=None):
-        self.groupby = ['route_id','service_id','direction_id','timeperiod_id']
-        self.sortby = ['route_id','service_id','direction_id','scheduled_start_time','timeperiod_id']
+        self.groupby = ['route_id','route_short_name','service_id','direction_id','timeperiod_id']
+        self.sortby = ['route_id','route_short_name','service_id','direction_id','scheduled_start_time','timeperiod_id']
         self.timeperiods = timeperiods #TODO
         self.agg_args = {'scheduled_start_time':[calc_headway],
                          'scheduled_runtime':[pd.Series.mean,pd.Series.std],
@@ -556,7 +556,7 @@ class stats():
         self.stop_time_stats = df_format_datetimes_as_str(self._stop_time_stats)
         return self.stop_time_stats
         
-    def make_trip_list(self, weekday=True, holiday=False):
+    def make_trip_list(self, weekday=True, holiday=False, apc_settings=self.tl_apc_settings, gtfs_settings=self.tl_gtfs_settings, overwrite=True):
         self.log.debug("making trip_list")
         # prep apc data if it has not already been done.
         if self._apc_pickle_files==None:
@@ -572,41 +572,37 @@ class stats():
             gtfs_trip_stat_files.append(ofile)
         if self.distributed:
             self._apc_trip_list = self._aggregate_and_apply(apc_files,
-                                                            groupby=self.tl_apc_settings.groupby, 
-                                                            sortby=self.tl_apc_settings.sortby, 
-                                                            rename=self.tl_apc_settings.rename, 
-                                                            agg_args=self.tl_apc_settings.agg_args, 
-                                                            apply_args=self.tl_apc_settings.apply_args)
+                                                            groupby=apc_settings.groupby, 
+                                                            sortby=apc_settings.sortby, 
+                                                            rename=apc_settings.rename, 
+                                                            agg_args=apc_settings.agg_args, 
+                                                            apply_args=apc_settings.apply_args)
             self._gtfs_trip_list = self._aggregate_and_apply(gtfs_trip_stat_files,
-                                                             groupby=self.tl_gtfs_settings.groupby, 
-                                                             sortby=self.tl_gtfs_settings.sortby, 
-                                                             rename=self.tl_gtfs_settings.rename, 
-                                                             agg_args=self.tl_gtfs_settings.agg_args, 
-                                                             apply_args=self.tl_gtfs_settings.apply_args)
+                                                             groupby=gtfs_settings.groupby, 
+                                                             sortby=gtfs_settings.sortby, 
+                                                             rename=gtfs_settings.rename, 
+                                                             agg_args=gtfs_settings.agg_args, 
+                                                             apply_args=gtfs_settings.apply_args)
         else:
             self._apc_trip_list = self._aggregate_df(apc_files,
-                                                     groupby=self.tl_apc_settings.groupby, 
-                                                     sortby=self.tl_apc_settings.sortby, 
-                                                     rename=self.tl_apc_settings.rename, 
-                                                     agg_args=self.tl_apc_settings.agg_args, 
-                                                     apply_args=self.tl_apc_settings.apply_args)
+                                                     groupby=apc_settings.groupby, 
+                                                     sortby=apc_settings.sortby, 
+                                                     rename=apc_settings.rename, 
+                                                     agg_args=apc_settings.agg_args, 
+                                                     apply_args=apc_settings.apply_args)
             self._gtfs_trip_list = self._aggregate_df(gtfs_trip_stat_files,
-                                                      groupby=self.tl_gtfs_settings.groupby, 
-                                                      sortby=self.tl_gtfs_settings.sortby, 
-                                                      rename=self.tl_gtfs_settings.rename, 
-                                                      agg_args=self.tl_gtfs_settings.agg_args, 
-                                                      apply_args=self.tl_gtfs_settings.apply_args)
+                                                      groupby=gtfs_settings.groupby, 
+                                                      sortby=gtfs_settings.sortby, 
+                                                      rename=gtfs_settings.rename, 
+                                                      agg_args=gtfs_settings.agg_args, 
+                                                      apply_args=tl_gtfs_settings.apply_args)
            
         trip_list = pd.DataFrame(self._apc_trip_list, copy=True)
-        #self.log.debug(trip_list.head())
         trip_list.loc[:,'route_id'] = np.nan
         trip_list.loc[:,'trip_id'] = np.nan
         trip_list.loc[:,'direction_id'] = np.nan
-        #self.log.debug(trip_list.head())
         trip_list = trip_list.reset_index().set_index(self.apc_to_gtfs.index.names)
-        #self.log.debug(trip_list.head())
         trip_list.update(self.apc_to_gtfs)
-        #self.log.debug(trip_list.head())
         trip_list.loc[:,'scheduled_start_time'] = pd.NaT
         trip_list.loc[:,'scheduled_runtime'] = pd.NaT
         trip_list.loc[:,'scheduled_moving_time'] = pd.NaT
@@ -639,21 +635,15 @@ class stats():
                                      ]]
         
         trip_list.rename(columns={'file_idx':'service_id'}, inplace=True)
-        self._trip_list = trip_list
+        if overwrite==True:
+            self._trip_list = trip_list
         self.log.debug("done making trip_list")
         return trip_list
     
     def make_group_trip_list(self, weekday=True, holiday=False):
         self.log.debug("making group_trip_list")
-        
-        if not isinstance(self._trip_list, pd.DataFrame):
-            self.make_trip_list()
-            
         if not isinstance(self.groups, pd.DataFrame):
             raise Exception("make_group_stats requires groups.txt")
-            
-        trip_list = pd.DataFrame(self._trip_list, copy=True)
-        trip_list.rename(columns={'file_idx':'service_id'}, inplace=True) # this should be unnecessary.
         
         has_thru = 'thru_node_set' in self.groups.columns
         n = []
@@ -669,11 +659,8 @@ class stats():
             
             for service_id, feed in self.gtfs_feeds.iteritems():
                 nodes = feed.stop_times.loc[feed.stop_times['stop_id'].isin(from_node_set),['trip_id','stop_sequence']]
-                #self.log.debug(nodes)
                 nodes.rename(columns={'stop_sequence':'from_node_seq'}, inplace=True)
-                #self.log.debug(nodes)
                 nodes.set_index('trip_id', inplace=True)
-                #self.log.debug(nodes)
                 nodes.loc[:,'to_node_seq'] = feed.stop_times.loc[feed.stop_times['stop_id'].isin(to_node_set),].set_index('trip_id')['stop_sequence']
                 self.log.debug(nodes)
                 nodes.loc[:,'service_id'] = service_id
@@ -692,14 +679,15 @@ class stats():
                 
         group_trips = pd.concat(n)
         
-        s = trip_list.groupby(['service_id','trip_id']).size()
-        self.log.debug(s[s>1])
+        if not isinstance(self._trip_list, pd.DataFrame):
+            trip_list = self.make_trip_list(apc_settings=self.gtl_apc_settings, gtfs_settings=self.gtl_gtfs_settings, overwrite=False)
+        #trip_list = pd.DataFrame(self._trip_list, copy=True)
+        trip_list.rename(columns={'file_idx':'service_id'}, inplace=True) # this should be unnecessary.
         trip_list.set_index(['service_id','trip_id'], inplace=True)
         
         cols = []
         for col in trip_list.columns:
             if col not in group_trips.columns:
-                #group_trips.loc[:,col] = np.nan
                 cols.append(col)
         
         group_trips = pd.merge(group_trips, trip_list.loc[:,cols], left_index=True, right_index=True)
