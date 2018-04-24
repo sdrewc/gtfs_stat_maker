@@ -74,7 +74,12 @@ def apply_time_periods(series, timeperiods):
             tpseries.loc[(series<row['timeperiod_end_time']) | (series>row['timeperiod_start_time'])] = row['timeperiod_id']
     return tpseries
 
-#def calc_headway(series)
+def df_format_datetimes_as_str(df, strftime='%H:%M:%S'):
+    df = pd.DataFrame(df, copy=True)
+    dfc = df.select_dtypes(include=[np.datetime64,np.timedelta64])
+    for col in dfc.columns:
+        df.loc[:,col] = pd.to_datetime(dfc[col]).dt.strftime(strftime)
+    return df
 
 def datetime_to_timedelta(d):
         try:
