@@ -44,6 +44,15 @@ def calc_headway(series, periods=-1):
 def apply_diff(x, val1, val2):
     return x[val1] - x[val2]
         
+def sumif(series, condition):
+    return series[condition].sum()
+
+def countif(series, condition):
+    return len(series[condition])
+
+def weighted_mean(series, weights):
+    return (series*weights).sum() / weights.sum()
+
 def normalize_timedelta(series, zero_hour=0):
     '''
     Normalize a timedelta series around a zero hour
