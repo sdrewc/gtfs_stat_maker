@@ -72,7 +72,7 @@ def proc_aggregate(infile, outfile, groupby, sortby, rename, agg_args):
                 nc = rename[c]
                 new_cols.append(nc)
             except Exception as e:
-                print 'failed to rename column %s' % c
+                print 'failed to rename column %s' % str(c)
                 print e
         agg.columns = new_cols
             
