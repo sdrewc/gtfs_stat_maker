@@ -440,92 +440,6 @@ class stats():
                 dump_pickle(ifile, group)
         self._apc_pickle_files = apc_pickle_files
         return apc_pickle_files
-    
-    def _prep_apc_pickle_files_OLD(self, weekday, holiday):
-        apc_pickle_files = {}
-        us_holidays = holidays.UnitedStates()
-        for key in self.apc_keys:
-            self.log.debug('reading file %s, key %s' % (self.apc_path, key))
-            apc = pd.read_hdf(self.apc_path, key)
-            
-            # assign each record to the gtfs feed with corresponding date range
-            self.log.debug('updating file_idx')
-            for idx, row in self.calendar.iterrows():
-                apc.loc[apc['DATE'].between(row['start_date'],row['end_date']),'file_idx'] = idx
-                
-            # create new attributes
-            apc.loc[:,'stopped_time'] = apc['DEPARTURE_TIME'] - apc['ARRIVAL_TIME']
-            apc.loc[:,'weekday'] = apc['DATE'].map(lambda x: x.weekday())
-            if weekday: 
-                apc = apc.loc[apc['weekday'].isin([0,1,2,3,4])]
-            if not holiday:
-                apc = apc.loc[~apc['DATE'].map(lambda x: x in us_holidays)]
-            ifile = self.fg.next()
-            dump_pickle(ifile, apc)
-            apc_pickle_files[key] = ifile
-        self._apc_pickle_files = apc_pickle_files
-        return apc_pickle_files
-    
-    def reagg_apc_stop_time_stats(self, groupby=None, **kwargs):
-        '''
-        Assumes that apc data has already been read, and apc_stop_time_stats created.
-        Reaggregates self._apc_stop_time_stats to some higher level of aggregation.
-        groupby is a set of columns for aggregation
-        kwargs is a dict of column-name: aggregation function or dict
-            if dict, then it should be aggfunc: kwargs where kwargs are arguments
-            required by aggfunc
-        '''
-        # TODO make a distributed version of this
-        columns = [] # list of tuples to make an index or multiindex
-        agg_dfs = [] # list of all the aggregations.  Each will be a series with an
-                     # index defined by groupby
-        groupby = self.sts_settings.groupby if groupby==None else groupby
-        kwargs = self.sts_settings.reagg_args if kwargs=={} else kwargs
-        self.log.debug('set groupby to %s' % (str(groupby)))
-        self.log.debug('set kwargs to %s' % (str(kwargs)))
-        
-        grouped = self._apc_stop_time_stats.groupby(groupby)
-        for column, arg in kwargs.iteritems():
-            if isinstance(arg, dict):
-                for aggfunc, kas in arg.iteritems():
-                    if len(arg) > 1:
-                        columns.append((column,aggfunc.__name__))
-                    else:
-                        columns.append((column,))
-                    try:
-                        self.log.debug('grouped.agg({%s:%s}, %s)' % (column, aggfunc, kas))
-                        agg = grouped.agg({column:aggfunc}, **kas)
-                    except:
-                        self.log.debug('grouped.apply(%s, %s)' % (aggfunc, kas))
-                        agg = grouped.apply(aggfunc, **kas)
-                    agg_dfs.append(agg)            
-            elif isinstance(arg, list):
-                for aggfunc in arg:
-                    if len(arg) > 1:
-                        columns.append((column,aggfunc.__name__))
-                    else:
-                        columns.append((column,))
-                    try:
-                        agg = grouped.agg({column:aggfunc})
-                    except:
-                        agg = grouped.apply(aggfunc)
-                    agg_dfs.append(agg)
-            else:
-                columns.append((column,))
-                try:
-                    agg = grouped.agg({column:arg})
-                except:
-                    agg = grouped.apply({column:arg})
-                agg_dfs.append(agg)
-        
-        self.log.debug('found %s column names for %s aggregations' % (len(columns), len(agg_dfs)))
-        mi = pd.MultiIndex.from_tuples(columns)
-        df = pd.DataFrame(index=agg_dfs[0].index, columns=mi)    
-        for col, agg in izip(mi, agg_dfs):
-            df.loc[:,col] = agg
-            
-        self._apc_stop_time_stats = df#.reset_index()
-        return self._apc_stop_time_stats
             
     def match_apc_to_gtfs(self):
         group_columns = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
@@ -704,7 +618,7 @@ class stats():
            
         trip_list = pd.DataFrame(self._apc_trip_list, copy=True)
         trip_list.loc[:,'route_id'] = np.nan
-        #trip_list.loc[:,'route_short_name'] = np.nan
+        trip_list.loc[:,'route_short_name'] = np.nan
         trip_list.loc[:,'trip_id'] = np.nan
         trip_list.loc[:,'direction_id'] = np.nan
         trip_list = trip_list.reset_index().set_index(self.apc_to_gtfs.index.names)
@@ -718,7 +632,6 @@ class stats():
         
         gtfs_trips = self._gtfs_trip_list.reset_index().set_index(['file_idx','trip_id','direction_id'])
         trip_list.update(gtfs_trips, overwrite=False)
-        #trip_list.update(gtfs_trips.loc[:,['scheduled_start_time','scheduled_runtime','scheduled_moving_time','scheduled_stopped_time']], overwrite=False)
         
         # the update casts timedeltas to datetimes for some reason, so cast them back
         trip_list.reset_index(inplace=True)
@@ -885,10 +798,7 @@ class stats():
         trip_stats.loc[:,'scheduled_stopped_time'] = pd.NaT
         trip_stats = trip_stats.reset_index().set_index(['file_idx','trip_id','direction_id'])
         gtfs_trips = self._gtfs_trip_list.reset_index().set_index(['file_idx','trip_id','direction_id'])
-        #gtfs_trips.to_hdf(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018May10.113014\__gtfs_trips.h5','data')
-        #trip_stats.to_hdf(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018May10.113014\__trip_stats.h5','data')
-        #self.log.debug(trip_stats.dtypes)
-        #self.log.debug(gtfs_trips.dtypes)
+
         try:
             trip_stats.update(gtfs_trips, overwrite=False)
         except Exception as e:
@@ -896,7 +806,7 @@ class stats():
             self.log.debug('trying to convert a column')
             gtfs_trips['scheduled_start_time'] = pd.to_datetime(gtfs_trips['scheduled_start_time'])
             trip_stats.update(gtfs_trips, overwrite=False)
-        #self.log.debug(trip_stats.head())
+
         # the update casts timedeltas to datetimes for some reason, so cast them back
         trip_stats.reset_index(inplace=True)
         trip_stats.loc[:,'scheduled_start_time'] = trip_stats['scheduled_start_time'].map(lambda x: datetime_to_timedelta(x))
