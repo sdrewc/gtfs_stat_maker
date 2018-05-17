@@ -7,7 +7,7 @@ import datetime as dt
 import partridge as ptg
 from itertools import izip
 sys.path.insert(0,os.path.dirname(os.path.realpath(__file__)))
-from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds, datetime_to_timedelta, agg_trip_runtime, apply_diff, str_to_timedelta, apply_time_periods, calc_headway, df_format_datetimes_as_str, weighted_mean
+from utils import get_keys, meantime, stdtime, agg_mean, agg_std, normalize_timedelta, datetime_to_seconds, datetime_to_timedelta, agg_trip_runtime, apply_diff, str_to_timedelta, apply_time_periods, calc_headway, df_format_datetimes_as_str, weighted_mean, semidev
 import holidays
 
 class stop_time_stats_settings():
@@ -58,9 +58,12 @@ class trip_list_settings():
                            ('LOAD_DEP','max'):'max_load',
                            ('LOAD_DEP','mean'):'avg_load'}
             
-            self.apply_args = {'observed_runtime':[apply_diff,{'val1':'observed_end_time','val2':'observed_start_time'}],
-                               'observed_moving_time':[apply_diff,{'val1':'observed_runtime','val2':'observed_stopped_time'}],
-                               'load_change':[apply_diff,{'val1':'on','val2':'off'}]}
+            self.apply_args = [{'observed_start_time':datetime_to_timedelta},
+                               {'observed_end_time':datetime_to_timedelta},
+                               {'observed_runtime':[apply_diff,{'val1':'observed_end_time','val2':'observed_start_time'}]},
+                               {'observed_moving_time':[apply_diff,{'val1':'observed_runtime','val2':'observed_stopped_time'}]},
+                               {'load_change':[apply_diff,{'val1':'on','val2':'off'}]}
+                               ]
         elif source=='gtfs':
             self.groupby = ['file_idx','trip_id','direction_id']
             self.sortby = ['file_idx','trip_id','direction_id','stop_sequence']
@@ -83,15 +86,20 @@ class trip_stats_settings():
         '''
         self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
         self.sortby = None
-        self.agg_args = {'observed_runtime':[pd.Series.mean,pd.Series.std],
+        self.agg_args = {'observed_start_time':[pd.Series.mean,pd.Series.std,semidev],
+                         'observed_runtime':[pd.Series.mean,pd.Series.std,semidev],
                          'observed_stopped_time':[pd.Series.mean,pd.Series.std],
                          'on':['sum',pd.Series.mean,pd.Series.std],
                          'off':['sum',pd.Series.mean,pd.Series.std],
                          'max_load':[pd.Series.mean,pd.Series.std],
                          'avg_load':[pd.Series.mean,pd.Series.std],
                          'observed_moving_time':[pd.Series.mean,pd.Series.std,'size']}        
-        self.rename = {('observed_runtime','mean'):'avg_observed_runtime',
+        self.rename = {('observed_start_time','mean'):'avg_observed_start_time',
+                       ('observed_start_time','std'):'stdev_observed_start_time',
+                       ('observed_start_time','semidev'):'semidev_observed_start_time',
+                       ('observed_runtime','mean'):'avg_observed_runtime',
                        ('observed_runtime','std'):'stdev_observed_runtime',
+                       ('observed_runtime','semidev'):'semidev_observed_runtime',
                        ('observed_stopped_time','mean'):'avg_observed_stopped_time',
                        ('observed_stopped_time','std'):'stdev_observed_stopped_time',
                        ('observed_moving_time','mean'):'avg_observed_moving_time',
@@ -835,6 +843,9 @@ class stats():
                                        'scheduled_runtime',
                                        'scheduled_moving_time',
                                        'scheduled_stopped_time',
+                                       'avg_observed_start_time',
+                                       'stdev_observed_start_time',
+                                       'semidev_observed_start_time',
                                        'avg_observed_runtime',
                                        'stdev_observed_runtime',
                                        'avg_observed_moving_time',
@@ -890,7 +901,8 @@ class stats():
     def _aggregate_df(self, data, groupby, sortby, rename, agg_args, apply_args):
         if sortby != None:
             data.sort_values(by=sortby, inplace=True)
-        
+        self.log.debug(data.head())
+        self.log.debug(data.dtypes)
         agg = data.groupby(groupby).agg(agg_args)
         
         if rename!=None:
