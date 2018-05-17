@@ -53,6 +53,9 @@ def countif(series, condition):
 def weighted_mean(series, weights):
     return (series*weights).sum() / weights.sum()
 
+def semidev(series):
+    return series[series>=series.mean()].std()
+
 def normalize_timedelta(series, zero_hour=0):
     '''
     Normalize a timedelta series around a zero hour
