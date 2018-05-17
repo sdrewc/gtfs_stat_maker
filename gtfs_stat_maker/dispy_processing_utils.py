@@ -89,15 +89,22 @@ def proc_apply(infile, outfile, apply_args, axis):
     print "proc_apply.loading"
     data = load_pickle(infile)
     print "proc_apply.applying"
-    if not isinstance(apply_args, dict):
+    if not isinstance(apply_args, dict) and not isinstance(apply_args, list):
         raise Exception(r'apply_args must be type (dict)')
-    for fname, apply_func in apply_args.iteritems():
-        if isinstance(apply_func, list):
-            print "proc_apply.applying.%s" % (apply_func[0].__name__)
-            data[fname] = data.apply(apply_func[0], axis=axis, **apply_func[1])
-        else:
-            print "proc_apply.applying.%s" % (apply_func.__name__)
-            data[fname] = data.apply(apply_func, axis=axis)
+    if isinstance(apply_args, dict):
+        apply_args = [apply_args]
+    for app_args in apply_args:
+        for fname, apply_func in app_args.iteritems():
+            if isinstance(apply_func, list):
+                print "proc_apply.applying.%s" % (apply_func[0].__name__)
+                data[fname] = data.apply(apply_func[0], axis=axis, **apply_func[1])
+            else:
+                print "proc_apply.applying.%s" % (apply_func.__name__)
+                try:
+                    data[fname] = data[fname].apply(apply_func)
+                except:
+                    data[fname] = data.apply(apply_func, axis=axis)
+            
     print "proc_apply.dumping"
     dump_pickle(outfile, data)
     return outfile
