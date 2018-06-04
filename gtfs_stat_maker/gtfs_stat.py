@@ -278,12 +278,7 @@ class stats():
                                      'md':['09:00:00','15:30:00'],
                                      'pm':['15:30:00','18:30:00'],
                                      'ev':['18:30:00','27:00:00']}
-        self.timeperiods = self.set_timeperiods(timeperiods) if timeperiods else self.set_timeperiods(self._default_timeperiods)
-        
-        #print self.timeperiods
-        #self.log.debug(self.timeperiods)
-        #self.timeperiods.to_csv(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018May14.135146\timeperiods.txt')
-        
+        self.timeperiods = self.set_timeperiods(timeperiods) if timeperiods else self.set_timeperiods(self._default_timeperiods)        
         self.dow_by_service_id = None
         self.dow_count_by_service_id = None
         self.distributed = distributed
@@ -468,7 +463,6 @@ class stats():
                     
                     if has_thru:
                         thru_node_set = row['thru_node_set'] if isinstance(row['thru_node_set'], list) else [row['thru_node_set']]
-                        #self.log.debug(thru_node_set)
                     
                     # get the stop times with a node in the [from_node_set]
                     nodes = feed.stop_times.loc[feed.stop_times['stop_id'].isin(from_node_set),['trip_id','stop_sequence']]
@@ -477,8 +471,6 @@ class stats():
                     
                     # of these nodes, set the to_node_seq if it has a node in [to_node_set]
                     nodes.loc[:,'to_node_seq'] = feed.stop_times.loc[feed.stop_times['stop_id'].isin(to_node_set),].set_index('trip_id')['stop_sequence']
-                    #self.log.debug(nodes)
-                    #nodes.loc[:,'file_idx'] = file_idx
                     nodes.loc[:,'group_id'] = row['group_id']
                     
                     if has_thru and pd.notnull(row['thru_node_set']):
@@ -490,15 +482,13 @@ class stats():
                         nodes = nodes.loc[nodes['from_node_seq'].lt(nodes['to_node_seq'])]
                     
                     for trip_id, n in nodes.iterrows():
-                        #self.log.debug('setting group_id on stop_times for file %d and group %s' % (file_idx, row['group_id']))
-                        #feed.stop_times.loc[feed.stop_times['trip_id'].eq(trip_id) & feed.stop_times['stop_sequence'].between(n['from_node_seq'],n['to_node_seq']), 'group_id'] = row['group_id']
                         gtrips = feed.stop_times.loc[feed.stop_times['trip_id'].eq(trip_id) & 
                                                      feed.stop_times['stop_sequence'].between(n['from_node_seq'],n['to_node_seq']), 
                                                      ['file_idx','trip_id','stop_id','stop_sequence']]
                         gtrips.loc[:,'group_id'] = row['group_id']
                         all_group_trips.append(gtrips)
             
-                self._group_stop_time_index = pd.concat(all_group_trips)#.set_index(['trip_id','stop_id','stop_sequence'])
+                self._group_stop_time_index = pd.concat(all_group_trips)
                 
             self.gtfs_feeds[file_idx] = feed
         return self.gtfs_feeds
@@ -594,7 +584,6 @@ class stats():
                     first_stops.loc[idx,'direction_id'] = dir_
                     break
         self.apc_to_gtfs = first_stops.loc[:,['route_id','route_short_name','trip_id','direction_id']]
-        #self.apc_to_gtfs = pd.DataFrame(self._apc_to_gtfs, copy=True)
         return self.apc_to_gtfs
     
     def make_stop_time_stats(self, weekday=True, holiday=False):
@@ -799,8 +788,6 @@ class stats():
             dump_pickle(new_apc_file,new_apc)
         
         gtfs_files = []    
-        
-        # TODO: is this necessary?
         for idx, feed in self.gtfs_feeds.iteritems():
             group_gtfs = pd.merge(self._group_stop_time_index,
                                   feed.stop_times,
@@ -810,15 +797,12 @@ class stats():
             gtfs_files.append(ofile)
             dump_pickle(ofile, group_gtfs)
         
-        
         self._apc_group_trip_list = self._aggregate_and_apply(apc_files,
                                                               groupby=self.gtl_apc_settings.groupby, 
                                                               sortby=self.gtl_apc_settings.sortby, 
                                                               rename=self.gtl_apc_settings.rename, 
                                                               agg_args=self.gtl_apc_settings.agg_args, 
                                                               apply_args=self.gtl_apc_settings.apply_args)
-        self._apc_group_trip_list.to_csv(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018May14.135146\_apc_group_trip_list.csv')
-        self._apc_group_trip_list.to_hdf(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018May14.135146\_apc_group_trip_list.h5','data')
                 
         self._gtfs_group_trip_list = self._aggregate_and_apply(gtfs_files,
                                                                groupby=self.gtl_gtfs_settings.groupby, 
@@ -826,10 +810,7 @@ class stats():
                                                                rename=self.gtl_gtfs_settings.rename, 
                                                                agg_args=self.gtl_gtfs_settings.agg_args, 
                                                                apply_args=self.gtl_gtfs_settings.apply_args)
-        self._gtfs_group_trip_list.to_csv(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018May14.135146\_gtfs_group_trip_list.csv')
-        self._gtfs_group_trip_list.to_hdf(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018May14.135146\_gtfs_group_trip_list.h5','data')
         
-        #trip_list = pd.DataFrame(self._trip_list, copy=True)
         group_trip_list = pd.DataFrame(self._apc_group_trip_list, copy=True)
         group_trip_list.loc[:,'scheduled_start_time'] = pd.NaT
         group_trip_list.loc[:,'scheduled_end_time'] = pd.NaT
@@ -837,7 +818,6 @@ class stats():
         group_trip_list.loc[:,'scheduled_moving_time'] = pd.NaT
         group_trip_list.loc[:,'scheduled_stopped_time'] = pd.NaT
         group_trip_list = group_trip_list.reset_index().set_index(['file_idx','trip_id','direction_id'])
-        
         
         gtfs_trips = self._gtfs_group_trip_list.reset_index().set_index(['file_idx','trip_id','direction_id'])
         group_trip_list.update(gtfs_trips, overwrite=False)
@@ -916,7 +896,7 @@ class stats():
         if not isinstance(self._trip_list, pd.DataFrame):
             self.make_trip_list(apc_settings=self.gtl_apc_settings, gtfs_settings=self.gtl_gtfs_settings, overwrite=False)
             trip_list = pd.DataFrame(self._trip_list, copy=True)
-        #trip_list = pd.DataFrame(self._trip_list, copy=True)
+            
         trip_list.rename(columns={'file_idx':'service_id'}, inplace=True) # this should be unnecessary.
         trip_list.set_index(['service_id','trip_id'], inplace=True)
         
@@ -987,7 +967,6 @@ class stats():
         self.log.debug(trip_stats.head())
 
         ridership = trip_stats.loc[:,['file_idx','route_id','route_short_name','trip_id','direction_id',
-                                     # 'total_boardings',
                                       'avg_boardings',
                                       'stdev_boardings',
                                       'avg_alightings',
@@ -1029,13 +1008,6 @@ class stats():
         
         trip_stats = pd.merge(self._trip_stats, self._trip_ridership, on=['service_id','route_id','route_short_name','trip_id','direction_id'])
         trip_stats.loc[:,'timeperiod_id'] = apply_time_periods(trip_stats['scheduled_start_time'], self.timeperiods)
-        #trip_stats.set_index('timeperiod_id', inplace=True)
-        #self.log.debug(trip_stats.head())
-        #self.log.debug(self.timeperiods)
-        #self.log.debug(self.timeperiods.set_index('timeperiod_id')['timeperiod_start_time'])
-        #trip_stats.loc[:,'start_time'] = self.timeperiods.set_index('timeperiod_id')['timeperiod_start_time']
-        #trip_stats.loc[:,'end_time'] = self.timeperiods.set_index('timeperiod_id')['timeperiod_end_time']
-        #self.log.debug(trip_stats.head())
         trip_stats.reset_index(inplace=True)
         
         route_stats = self._aggregate_df(data=trip_stats,
@@ -1045,29 +1017,17 @@ class stats():
                                          agg_args=self.rs_settings.agg_args, 
                                          apply_args=self.rs_settings.apply_args)
         
-        #self.log.debug(self.timeperiods.set_index('timeperiod_id')['timeperiod_start_time'])
         route_stats = route_stats.reset_index().set_index('timeperiod_id')
         route_stats.loc[:,'start_time'] = self.timeperiods.set_index('timeperiod_id')['timeperiod_start_time']
         route_stats.loc[:,'end_time'] = self.timeperiods.set_index('timeperiod_id')['timeperiod_end_time']
-        #trip_stats.reset_index(inplace=True)
-        #self.log.debug(trip_stats.head())
-        
-        #route_stats.to_csv(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018May14.135146\_route_stats.csv')
-        #route_stats.to_hdf(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\2018May14.135146\_route_stats.h5','data')
+
         route_stats = route_stats.reset_index().set_index(self.rs_settings.groupby)
 
         route_stats.reset_index(inplace=True)
         ridership = route_stats.loc[:,['service_id','route_id','route_short_name','direction_id',
                                        'timeperiod_id','start_time','end_time',
-                                     #  'total_boardings',
                                        'avg_boardings',
-                                     #  'stdev_boardings',
                                        'avg_alightings',
-                                     #  'stdev_alightings',
-                                     #        'avg_max_load',
-                                     #        'stdev_max_load',
-                                     #        'avg_load',
-                                     #        'stdev_load',
                                      'samples']]
         
         self._ridership_routes = ridership
@@ -1082,13 +1042,9 @@ class stats():
                                                'stdev_scheduled_stopped_time',
                                                'avg_scheduled_moving_time',
                                                'stdev_scheduled_moving_time',
-                                               #'avg_observed_headway',
                                                'avg_observed_runtime',
-                                               #'stdev_observed_runtime',
                                                'avg_observed_stopped_time',
-                                               #'stdev_observed_stopped_time',
                                                'avg_observed_moving_time',
-                                               #'stdev_observed_moving_time',
                                                'samples']]
         self.route_stats = df_format_datetimes_as_str(self._route_stats).set_index(['service_id','route_id','route_short_name','direction_id','timeperiod_id'])
         return
