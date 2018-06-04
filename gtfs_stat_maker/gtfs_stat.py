@@ -853,64 +853,6 @@ class stats():
         self._group_trip_list = group_trip_list
         self.log.debug("done making group_trip_list")
         return
-    
-    def make_group_trip_list_OLD(self, weekday=True, holiday=False):
-        self.log.debug("making group_trip_list")
-        if not isinstance(self.groups, pd.DataFrame):
-            raise Exception("make_group_stats requires groups.txt")
-        
-        has_thru = 'thru_node_set' in self.groups.columns
-        n = []
-        for idx, row in self.groups.iterrows():
-            from_node_set = row['from_node_set'] if isinstance(row['from_node_set'], list) else [row['from_node_set']]
-            to_node_set = row['to_node_set'] if isinstance(row['to_node_set'], list) else [row['to_node_set']]
-            
-            self.log.debug(from_node_set)
-            self.log.debug(to_node_set)
-            if has_thru:
-                thru_node_set = row['thru_node_set'] if isinstance(row['thru_node_set'], list) else [row['thru_node_set']]
-                self.log.debug(thru_node_set)
-            
-            for service_id, feed in self.gtfs_feeds.iteritems():
-                nodes = feed.stop_times.loc[feed.stop_times['stop_id'].isin(from_node_set),['trip_id','stop_sequence']]
-                nodes.rename(columns={'stop_sequence':'from_node_seq'}, inplace=True)
-                nodes.set_index('trip_id', inplace=True)
-                nodes.loc[:,'to_node_seq'] = feed.stop_times.loc[feed.stop_times['stop_id'].isin(to_node_set),].set_index('trip_id')['stop_sequence']
-                self.log.debug(nodes)
-                nodes.loc[:,'service_id'] = service_id
-                nodes.loc[:,'group_id'] = row['group_id']
-                
-                if has_thru:
-                    nodes.loc[:,'thru_node_seq'] = feed.stop_times.loc[feed.stop_times['stop_id'].isin(thru_node_set),].set_index('trip_id')['stop_sequence']
-                    nodes.dropna(subset=['from_node_seq','to_node_seq','thru_node_seq'])
-                    nodes = nodes.loc[nodes['from_node_seq'].lt(nodes['thru_node_seq']) & nodes['thru_node_seq'].lt(nodes['to_node_seq'])]
-                else:
-                    nodes.dropna(subset=['from_node_seq','to_node_seq'])    
-                    nodes = nodes.loc[nodes['from_node_seq'].lt(nodes['to_node_seq'])]
-                
-                nodes = nodes.reset_index().set_index(['service_id','trip_id'])
-                n.append(nodes)
-                
-        group_trips = pd.concat(n)
-        
-        if not isinstance(self._trip_list, pd.DataFrame):
-            self.make_trip_list(apc_settings=self.gtl_apc_settings, gtfs_settings=self.gtl_gtfs_settings, overwrite=False)
-            trip_list = pd.DataFrame(self._trip_list, copy=True)
-            
-        trip_list.rename(columns={'file_idx':'service_id'}, inplace=True) # this should be unnecessary.
-        trip_list.set_index(['service_id','trip_id'], inplace=True)
-        
-        cols = []
-        for col in trip_list.columns:
-            if col not in group_trips.columns:
-                cols.append(col)
-        
-        group_trips = pd.merge(group_trips, trip_list.loc[:,cols], left_index=True, right_index=True)
-        group_trips.reset_index(inplace=True)
-        
-        self._group_trip_list = group_trips
-        self.log.debug("done making group_trip_list")
-        return group_trips
             
     def make_trip_stats(self, weekday=True, holiday=False):
         '''
