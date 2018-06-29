@@ -44,19 +44,22 @@ class trip_list_settings():
         if source=='apc':
             self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','DATE','TRIP']
             self.sortby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','DATE','TRIP','SEQ']
-            self.agg_args = {'ARRIVAL_TIME':['first','last'],
+            self.agg_args = {'ARRIVAL_TIME':['last'],
+                             'DEPARTURE_TIME':['first'],
                              'stopped_time':['sum'],
                              'ON':['sum'],
                              'OFF':['sum'],
-                             'LOAD_DEP':['max','mean']}
+                             'LOAD_DEP':['max','mean'],
+                             'SEQ':['first']}
             
-            self.rename = {('ARRIVAL_TIME','first'):'observed_start_time',
+            self.rename = {('DEPARTURE_TIME','first'):'observed_start_time',
                            ('ARRIVAL_TIME','last'):'observed_end_time',
                            ('stopped_time','sum'):'observed_stopped_time',
                            ('ON','sum'):'on',
                            ('OFF','sum'):'off',
                            ('LOAD_DEP','max'):'max_load',
-                           ('LOAD_DEP','mean'):'avg_load'}
+                           ('LOAD_DEP','mean'):'avg_load',
+                           ('SEQ','first'):'FIRST_SEQ'}
             
             self.apply_args = [{'observed_start_time':datetime_to_timedelta},
                                {'observed_end_time':datetime_to_timedelta},
@@ -69,11 +72,13 @@ class trip_list_settings():
             self.sortby = ['file_idx','trip_id','direction_id','stop_sequence']
             self.agg_args = {'scheduled_arrival_time':['first'],
                              'scheduled_departure_time':['last'],
-                             'stopped_time':['sum']
+                             'stopped_time':['sum'],
+                             'stop_sequence':['first']
                              }
             self.rename = {('scheduled_arrival_time','first'):'scheduled_start_time',
                            ('scheduled_departure_time','last'):'scheduled_end_time',
-                           ('stopped_time','sum'):'scheduled_stopped_time'}
+                           ('stopped_time','sum'):'scheduled_stopped_time',
+                           ('stop_sequence','first'):'first_stop_sequence'}
             
             self.apply_args = {'scheduled_runtime':[apply_diff,{'val1':'scheduled_end_time','val2':'scheduled_start_time'}],
                                'scheduled_moving_time':[apply_diff,{'val1':'scheduled_runtime','val2':'scheduled_stopped_time'}]}
@@ -84,7 +89,8 @@ class trip_stats_settings():
         data into the GTFS-STAT format.
         
         '''
-        self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
+        #self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
+        self.groupby = ['file_idx','ROUTE_SHORT_NAME','DIR','FIRST_SEQ','TRIP']
         self.sortby = None
         self.agg_args = {'observed_start_time':[pd.Series.mean,pd.Series.std,semidev],
                          'observed_runtime':[pd.Series.mean,pd.Series.std,semidev],
@@ -449,8 +455,17 @@ class stats():
             
             feed.trips.set_index(['trip_id'], inplace=True)
             feed.stop_times.set_index(['trip_id'], inplace=True)
+            feed.stop_times.loc[:,'route_id'] = np.nan
             feed.stop_times.loc[:,'direction_id'] = np.nan
-            feed.stop_times.update(feed.trips.loc[:,['direction_id']], overwrite=False)
+            feed.stop_times.update(feed.trips.loc[:,['route_id','direction_id']], overwrite=False)
+            
+            feed.stop_times.reset_index(inplace=True)
+            feed.stop_times.set_index('route_id', inplace=True)
+            feed.routes.set_index('route_id', inplace=True)
+            feed.stop_times.loc[:,'route_short_name'] = np.nan
+            feed.stop_times.update(feed.routes.loc[:,['route_short_name']], overwrite=False)
+            
+            feed.routes.reset_index(inplace=True)
             feed.trips.reset_index(inplace=True)
             feed.stop_times.reset_index(inplace=True)
             
@@ -458,12 +473,17 @@ class stats():
             if isinstance(self.groups, pd.DataFrame):
                 self.log.debug('identifying groups for file %d...' % file_idx)
                 for idx, row in self.groups.iterrows():
+                    has_thru_this_row = False
                     from_node_set = row['from_node_set'] if isinstance(row['from_node_set'], list) else [row['from_node_set']]
                     to_node_set = row['to_node_set'] if isinstance(row['to_node_set'], list) else [row['to_node_set']]
                     
                     if has_thru:
                         thru_node_set = row['thru_node_set'] if isinstance(row['thru_node_set'], list) else [row['thru_node_set']]
-                    
+                        for nn in thru_node_set:
+                            if pd.notnull(nn):
+                                has_thru_this_row = True
+                                break
+                                
                     # get the stop times with a node in the [from_node_set]
                     nodes = feed.stop_times.loc[feed.stop_times['stop_id'].isin(from_node_set),['trip_id','stop_sequence']]
                     nodes.rename(columns={'stop_sequence':'from_node_seq'}, inplace=True)
@@ -473,7 +493,7 @@ class stats():
                     nodes.loc[:,'to_node_seq'] = feed.stop_times.loc[feed.stop_times['stop_id'].isin(to_node_set),].set_index('trip_id')['stop_sequence']
                     nodes.loc[:,'group_id'] = row['group_id']
                     
-                    if has_thru and pd.notnull(row['thru_node_set']):
+                    if has_thru_this_row:
                         nodes.loc[:,'thru_node_seq'] = feed.stop_times.loc[feed.stop_times['stop_id'].isin(thru_node_set),].set_index('trip_id')['stop_sequence']
                         nodes.dropna(subset=['from_node_seq','to_node_seq','thru_node_seq'])
                         nodes = nodes.loc[nodes['from_node_seq'].lt(nodes['thru_node_seq']) & nodes['thru_node_seq'].lt(nodes['to_node_seq'])]
@@ -531,16 +551,34 @@ class stats():
         self._apc_pickle_files = apc_pickle_files
         return apc_pickle_files
             
-    def match_apc_to_gtfs(self):
+    def match_apc_to_gtfs_OLD(self):
+        from scipy import stats
+        
         group_columns = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
-        agg_columns = ['SEQ','STOP_AVL','avg_arrival_time','stdev_arrival_time']
+        agg_columns = ['SEQ','STOP_AVL','avg_arrival_time','stdev_arrival_time','avg_departure_time','stdev_departure_time','samples']
         first_stops = self._apc_stop_time_stats.reset_index().groupby(group_columns)[agg_columns].first()
         first_stops.loc[:,'match_flag'] = 0
         file_idx, route_short_name, dir_ = None, None, None
         unfound_routes = set()
+        unmatched_apc_ids = []
 
+        gtfs_to_apc_list = []
+        for file_idx, feed in self.gtfs_feeds.iteritems():
+            gtfs_to_apc_list.append(feed.stop_times.groupby(['file_idx','trip_id']).first().reset_index())
+        gtfs_to_apc = pd.concat(gtfs_to_apc_list)
+        gtfs_to_apc = gtfs_to_apc.set_index(['file_idx','trip_id']).reset_index()
+        for c in ['ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','direction_id']:
+            gtfs_to_apc.loc[:,c] = np.nan
+        gtfs_to_apc.loc[:,'C'] = 0.0
+        gtfs_to_apc.loc[:,'moe'] = np.nan
+
+        file_idx = -1
+        
+        topNapc_to_gtfs = []
+        
         for idx, first_stop in first_stops.iterrows():
             if idx[0] != file_idx:
+                self.log.debug('new file_idx: %d' % idx[0])
                 file_idx = idx[0]
                 feed = self.gtfs_feeds[file_idx]
                 routes = feed.routes
@@ -555,35 +593,162 @@ class stats():
                         self.log.debug(e)
                         continue
                 if len(route) == 0:
+                    self.log.debug('unfound route: %d, %s' % (file_idx, route_short_name))
                     unfound_routes.add(route_short_name)
                     continue
                 trips = feed.trips.loc[feed.trips['route_id'].eq(route.iloc[0]['route_id']) & 
                                        feed.trips['direction_id'].eq(dir_)]
-                stop_times = feed.stop_times.loc[feed.stop_times['trip_id'].isin(trips['trip_id'])]
+                stop_times = gtfs_to_apc.loc[gtfs_to_apc['file_idx'].eq(file_idx) & gtfs_to_apc['trip_id'].isin(trips['trip_id'])]
+
+            s_mean = first_stop['avg_departure_time']
+            s_std = first_stop['stdev_departure_time']
+            N = first_stop['samples']
+    
+            if N == 1:
+                unmatched_apc_ids.append(idx)
+                continue
+            matches = stop_times.loc[stop_times['stop_id'].eq(str(first_stop['STOP_AVL']))]
+            if len(matches) == 0:
+                self.log.debug('unfound route: %d, %s, %d, %s, %s' % (file_idx, route_short_name, dir_, idx[3], idx[4]))
+                #unmatched_apc_ids.append(idx)
+                continue
             
-            for numdev in [1,2,3]:
-                start = first_stop['avg_arrival_time']-numdev*first_stop['stdev_arrival_time']
-                stop = first_stop['avg_arrival_time']+numdev*first_stop['stdev_arrival_time']
-                
-                matches = stop_times.loc[stop_times['stop_id'].eq(str(first_stop['STOP_AVL'])) & 
-                                         stop_times['scheduled_arrival_time'].between(start, stop)]
-                if len(matches) > 1:
-                    matches.loc[:,'diff'] = (matches['scheduled_arrival_time'] - first_stop['avg_arrival_time']).map(lambda x: abs(x))
-                    first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
-                    first_stops.loc[idx,'route_short_name'] = route_short_name
-                    first_stops.loc[idx,'trip_id'] = matches.loc[matches['diff'].idxmin(),'trip_id']
-                    first_stops.loc[idx,'direction_id'] = dir_
-                    first_stops.loc[idx,'match_flag'] = 1
+            for alpha in [0.95, 0.98, 0.99]:
+                t = stats.t.interval(alpha, N-1)[1]
+                lb = s_mean - t*(s_std/np.sqrt(N))
+                ub = s_mean + t*(s_std/np.sqrt(N))
+                if len(matches.loc[matches['scheduled_departure_time'].between(lb, ub)]) > 0:
+                    matches = matches.loc[matches['scheduled_departure_time'].between(lb, ub)]
+                    self.log.debug('%s, %s, %s: found %d matches at %0.2f' % (route_short_name, dir_, idx[4], len(matches), alpha))
                     break
-                elif len(matches) == 0:
+                elif alpha == 0.99:
+                    self.log.debug('%s, %s, %s: no matches found, considering all available.' % (route_short_name, dir_, idx[4]))
+
+            matches.loc[:,'moe'] = (first_stop['avg_departure_time'] - matches['scheduled_departure_time']).map(lambda x: abs(x))
+            matches.loc[:,'ROUTE_SHORT_NAME'] = route_short_name
+            matches.loc[:,'DIR'] = dir_
+            matches.loc[:,'direction_id'] = dir_
+            matches.loc[:,'PATTCODE'] = idx[3]
+            matches.loc[:,'TRIP'] = idx[4]
+            
+            topNapc_to_gtfs.append(matches)
+            matchidx = matches['moe'].idxmin()
+            matches = matches.loc[matchidx,:]
+            
+            if pd.notnull(gtfs_to_apc.loc[matchidx,'moe']):
+                self.log.debug("overwriting")
+                self.log.debug(gtfs_to_apc.loc[matchidx])
+                self.log.debug("with")
+                self.log.debug('%s, %d, %s, %s' % (route_short_name, dir_, idx[3], idx[4]))
+            
+            gtfs_to_apc.loc[matchidx,'moe'] = matches['moe']
+            gtfs_to_apc.loc[matchidx,'ROUTE_SHORT_NAME'] = route_short_name
+            gtfs_to_apc.loc[matchidx,'DIR'] = dir_
+            gtfs_to_apc.loc[matchidx,'direction_id'] = dir_
+            gtfs_to_apc.loc[matchidx,'PATTCODE'] = idx[3]
+            gtfs_to_apc.loc[matchidx,'TRIP'] = idx[4]
+            
+        # now handle unfound/unmatched
+        f = file(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\topNapc_to_gtfs_0.dat', 'wb')
+        pickle.dump(topNapc_to_gtfs, f, pickle.HIGHEST_PROTOCOL)
+        f.close()
+        topNapc_to_gtfs = pd.concat(topNapc_to_gtfs)       
+        f = file(r'Q:\Model Development\SHRP2-fasttrips\Task5\sfdata_wrangler\gtfs_stat\topNapc_to_gtfs.dat', 'wb')
+        pickle.dump(topNapc_to_gtfs, f, pickle.HIGHEST_PROTOCOL)
+        f.close()
+        
+        topNapc_to_gtfs.loc[:,'index'] = topNapc_to_gtfs.index
+        topNapc_to_gtfs = topNapc_to_gtfs.set_index(['file_idx','trip_id'])
+        # keep only the records which don't have a match
+        idx = gtfs_to_apc.loc[pd.isnull(gtfs_to_apc['TRIP'])].set_index(['file_idx','trip_id']).index
+        topNapc_to_gtfs = topNapc_to_gtfs.loc[topNapc_to_gtfs.index.isin(idx)]
+        topNapc_to_gtfs = topNapc_to_gtfs.reset_index().set_index(['trip_id']+group_columns)
+        #topNapc_to_gtfs = topNapc_to_gtfs.loc[gtfs_to_apc.loc[pd.isnull(gtfs_to_apc['TRIP'])].set_index(['file_idx','trip_id']).index,].reset_index().set_index(['file_idx','trip_id']+group_columns)
+        gta = gtfs_to_apc.dropna('TRIP').set_index(['trip_id']+group_columns)
+        topNapc_to_gtfs = topNapc_to_gtfs.loc[~topNapc_to_gtfs.index.isin(gta.index)]
+        best_apc_to_gtfs =  topNapc_to_gtfs.loc[topNapc_to_gtfs['moe'].idxmin()]
+        best_apc_to_gtfs.dropna('TRIP', inplace=True)
+        gtfs_to_apc.update(best_apc_to_gtfs)
+
+        closest_match = gtfs_to_apc.groupby(group_columns)['moe'].idxmin()
+        gtfs_to_apc = gtfs_to_apc.loc[closest_match]
+        self.apc_to_gtfs = gtfs_to_apc.set_index(group_columns)
+        #self.apc_to_gtfs = first_stops.loc[:,['route_id','route_short_name','trip_id','direction_id']]
+        return self.apc_to_gtfs
+
+    def match_apc_to_gtfs(self):
+        # TODO flip
+        group_columns = ['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP']
+        #group_columns = ['file_idx','ROUTE_SHORT_NAME','DIR','FIRST_SEQ','TRIP']
+        agg_columns = ['SEQ','STOP_AVL','avg_arrival_time','stdev_arrival_time','avg_departure_time','stdev_departure_time','samples']
+        first_stops = self._apc_stop_time_stats.reset_index().groupby(group_columns)[agg_columns].first()
+        # TODO (flip x2) REMOVE FOLLOWING 2 LINES AFTER PATTCODE IS REPLACED WITH FIRST_SEQ upsteam.
+        first_stops.loc[:,'FIRST_SEQ'] = first_stops['SEQ']
+        group_columns = ['file_idx','ROUTE_SHORT_NAME','DIR','FIRST_SEQ','TRIP']
+        file_idx, route_short_name, dir_ = None, None, None
+        unfound_routes = set()
+
+        gtfs_to_apc_list = []
+        for file_idx, feed in self.gtfs_feeds.iteritems():
+            stop_times = feed.stop_times.groupby(['file_idx','trip_id']).first()
+            gtfs_to_apc_list.append(stop_times.reset_index())
+        gtfs_to_apc = pd.concat(gtfs_to_apc_list)
+        gtfs_to_apc = gtfs_to_apc.set_index(['file_idx','trip_id']).reset_index()
+        gtfs_to_apc.loc[:,'TRIPKEY'] = gtfs_to_apc['scheduled_departure_time'].map(lambda x: int('%02d%02d' % (int(x.seconds/3600)*10, int(x.seconds%3600/60))))
+        
+        #for c in ['ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP','FIRST_SEQ']:
+        for c in ['ROUTE_SHORT_NAME','DIR','TRIP','FIRST_SEQ']:
+            gtfs_to_apc.loc[:,c] = np.nan
+        gtfs_to_apc.loc[:,'C'] = 0.0
+        gtfs_to_apc.loc[:,'moe'] = np.nan
+
+        gtfs_to_apc.loc[:,'TRIPKEY'] = gtfs_to_apc['scheduled_departure_time'].map(lambda x: int('%02d%02d' % (int(x.seconds/3600) + x.days*24, int(x.seconds%3600/60))))
+        gtfs_to_apc.loc[gtfs_to_apc['TRIPKEY'].gt(2700),'TRIPKEY'] = gtfs_to_apc['TRIPKEY'] - 2400
+        
+        first_stops.reset_index(inplace=True)
+        first_stops.loc[:,'TRIPKEY'] = first_stops['TRIP']
+        first_stops.loc[first_stops['TRIPKEY'].gt(2700),'TRIPKEY'] = first_stops['TRIPKEY'] - 2400
+        
+        for idx, trip in first_stops.iterrows():
+            if trip['file_idx'] != file_idx:
+                self.log.debug('new file_idx: %d' % trip['file_idx'])
+                file_idx = trip['file_idx']
+                feed = self.gtfs_feeds[file_idx]
+                routes = feed.routes
+            if trip['ROUTE_SHORT_NAME'] != route_short_name or trip['DIR'] != dir_:
+                route_short_name = trip['ROUTE_SHORT_NAME']
+                dir_ = trip['DIR']
+                route = routes.loc[routes['route_short_name'].eq(route_short_name)]
+                if len(route) == 0:
+                    try:
+                        route = routes.loc[routes['route_short_name'].eq(self.route_rebrand[route_short_name])]
+                    except Exception as e:
+                        self.log.debug(e)
+                        continue
+                if len(route) == 0:
+                    self.log.debug('unfound route: %d, %s' % (file_idx, route_short_name))
+                    unfound_routes.add(route_short_name)
                     continue
-                else:
-                    first_stops.loc[idx,'route_id'] = route.iloc[0]['route_id']
-                    first_stops.loc[idx,'route_short_name'] = route_short_name
-                    first_stops.loc[idx,'trip_id'] = matches.iloc[0]['trip_id']
-                    first_stops.loc[idx,'direction_id'] = dir_
-                    break
-        self.apc_to_gtfs = first_stops.loc[:,['route_id','route_short_name','trip_id','direction_id']]
+                trips = feed.trips.loc[feed.trips['route_id'].eq(route.iloc[0]['route_id']) & 
+                                       feed.trips['direction_id'].eq(dir_)]
+                stop_times = gtfs_to_apc.loc[gtfs_to_apc['file_idx'].eq(file_idx) & 
+                                             gtfs_to_apc['trip_id'].isin(trips['trip_id'])]
+            matches = stop_times.loc[gtfs_to_apc['TRIPKEY'].eq(trip['TRIPKEY'])]
+        
+            if len(matches) > 1:
+                self.log.warn(matches)
+                matches = matches.loc[matches['stop_sequence'].eq(trip['SEQ'])]
+                if len(matches) == 0:
+                    self.log.warn('NO MATCHES AFTER FILTERING FOR STOP SEQUENCE!!')
+                
+            gtfs_to_apc.loc[matches.index,'ROUTE_SHORT_NAME'] = route_short_name
+            gtfs_to_apc.loc[matches.index,'DIR'] = dir_
+            gtfs_to_apc.loc[matches.index,'FIRST_SEQ'] = trip['FIRST_SEQ']
+            gtfs_to_apc.loc[matches.index,'TRIP'] = trip['TRIP']
+        
+        self.apc_to_gtfs = gtfs_to_apc.drop_duplicates(group_columns).set_index(group_columns)
+        self.apc_to_gtfs = self.apc_to_gtfs.loc[:,['PATTCODE','route_id','route_short_name','direction_id','trip_id']]
+        #self.apc_to_gtfs = first_stops.loc[:,['route_id','route_short_name','trip_id','direction_id']]
         return self.apc_to_gtfs
     
     def make_stop_time_stats(self, weekday=True, holiday=False):
@@ -626,7 +791,6 @@ class stats():
                                                            rename=self.sts_settings.rename, 
                                                            agg_args=self.sts_settings.agg_args, 
                                                            apply_args=self.sts_settings.apply_args)
-        
         self.match_apc_to_gtfs()
         stop_time_stats = self._apc_stop_time_stats.reset_index().set_index(['file_idx','ROUTE_SHORT_NAME','DIR','PATTCODE','TRIP'])
         stop_time_stats.loc[:,'route_id'] = np.nan
@@ -802,15 +966,13 @@ class stats():
                                                               sortby=self.gtl_apc_settings.sortby, 
                                                               rename=self.gtl_apc_settings.rename, 
                                                               agg_args=self.gtl_apc_settings.agg_args, 
-                                                              apply_args=self.gtl_apc_settings.apply_args)
-                
+                                                              apply_args=self.gtl_apc_settings.apply_args)      
         self._gtfs_group_trip_list = self._aggregate_and_apply(gtfs_files,
                                                                groupby=self.gtl_gtfs_settings.groupby, 
                                                                sortby=self.gtl_gtfs_settings.sortby, 
                                                                rename=self.gtl_gtfs_settings.rename, 
                                                                agg_args=self.gtl_gtfs_settings.agg_args, 
                                                                apply_args=self.gtl_gtfs_settings.apply_args)
-        
         group_trip_list = pd.DataFrame(self._apc_group_trip_list, copy=True)
         group_trip_list.loc[:,'scheduled_start_time'] = pd.NaT
         group_trip_list.loc[:,'scheduled_end_time'] = pd.NaT
@@ -906,7 +1068,6 @@ class stats():
         trip_stats.loc[:,'scheduled_runtime'] = trip_stats['scheduled_runtime'].map(lambda x: datetime_to_timedelta(x))
         trip_stats.loc[:,'scheduled_moving_time'] = trip_stats['scheduled_moving_time'].map(lambda x: datetime_to_timedelta(x))
         trip_stats.loc[:,'scheduled_stopped_time'] = trip_stats['scheduled_stopped_time'].map(lambda x: datetime_to_timedelta(x))
-        self.log.debug(trip_stats.head())
 
         ridership = trip_stats.loc[:,['file_idx','route_id','route_short_name','trip_id','direction_id',
                                       'avg_boardings',
@@ -1023,8 +1184,6 @@ class stats():
     def _aggregate_df(self, data, groupby, sortby, rename, agg_args, apply_args):
         if sortby != None:
             data.sort_values(by=sortby, inplace=True)
-        self.log.debug(data.head())
-        self.log.debug(data.dtypes)
         agg = data.groupby(groupby).agg(agg_args)
         
         if rename!=None:
